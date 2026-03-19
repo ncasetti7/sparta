@@ -1,0 +1,14 @@
+{
+    "n_conformers": 50,
+    "n_seeds": 3,
+    "stretch_factors": [1.3, 1.5, 1.8],
+    "top_k": 5,
+    "n_images": 15,
+    "neb_fmax": 0.001,
+    "neb_steps": 200,
+    "propagation_threshold": 0.0001,
+    "propagation_step_size": 2.0,
+    "max_iterations": 40,
+    "objective": "barrier",
+    "d_power": 4
+}

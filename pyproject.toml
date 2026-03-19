@@ -1,0 +1,23 @@
+[project]
+name = "sparta"
+version = "0.1.0"
+description = "Steric Path Alignment for Reactive Transformation Assessment"
+requires-python = ">=3.11"
+dependencies = [
+    "ase>=3.26.0",
+    "rdkit>=2025.9.1",
+    "scipy>=1.16.2",
+    "numpy>=1.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
