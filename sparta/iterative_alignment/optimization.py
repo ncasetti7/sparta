@@ -24,7 +24,7 @@ from sparta.iterative_alignment.force_propagation import (
     compute_endpoint_gradient_barrier,
     compute_endpoint_gradient_total,
 )
-from sparta.iterative_alignment.idpp import create_idpp_calculators
+from sparta.iterative_alignment.idpp import IDPP, create_idpp_calculators
 
 if TYPE_CHECKING:
     from sparta.reaction import Reaction
@@ -102,6 +102,11 @@ def _run_neb(images, n_images, fmax, steps, verbose):
     calcs = create_idpp_calculators(initial, final, n_images)
     for k, calc in enumerate(calcs):
         images[k + 1].calc = calc
+    # Attach endpoint calculators required by the improvedtangent NEB method
+    initial_pos = initial.get_positions()
+    final_pos = final.get_positions()
+    images[0].calc = IDPP(initial_pos, final_pos, alpha=0.0)
+    images[-1].calc = IDPP(initial_pos, final_pos, alpha=1.0)
 
     neb = NEB(images)
     if verbose:
