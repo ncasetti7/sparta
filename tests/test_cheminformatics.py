@@ -320,3 +320,53 @@ class TestTransferConformer:
         src = cheminformatics.add_coords_to_mol(coords, src)
         with pytest.raises(ValueError):
             cheminformatics.transfer_conformer(src, dst)
+
+
+# ---------------------------------------------------------------------------
+# generate_conformer
+# ---------------------------------------------------------------------------
+
+class TestGenerateConformer:
+    def test_returns_mol_with_one_conformer(self):
+        mol = cheminformatics.make_mol("[F:1][F:2]")
+        mol = cheminformatics.generate_conformer(mol, "[F:1][F:2]", seed=0)
+        assert mol.GetNumConformers() == 1
+
+    def test_coordinates_are_finite(self):
+        mol = cheminformatics.make_mol("[F:1][F:2]")
+        mol = cheminformatics.generate_conformer(mol, "[F:1][F:2]", seed=0)
+        _, coords = cheminformatics.get_coords_conformer(mol)
+        assert np.all(np.isfinite(coords))
+
+    def test_coordinate_shape(self):
+        mol = cheminformatics.make_mol("[F:1][F:2]")
+        mol = cheminformatics.generate_conformer(mol, "[F:1][F:2]", seed=0)
+        _, coords = cheminformatics.get_coords_conformer(mol)
+        assert coords.shape == (2, 3)
+
+    def test_bond_length_reasonable_for_ff(self):
+        """F-F bond should land in a physically plausible range after UFF opt."""
+        mol = cheminformatics.make_mol("[F:1][F:2]")
+        mol = cheminformatics.generate_conformer(mol, "[F:1][F:2]", seed=0)
+        _, coords = cheminformatics.get_coords_conformer(mol)
+        dist = float(np.linalg.norm(coords[0] - coords[1]))
+        assert 1.0 < dist < 2.5
+
+    def test_multi_fragment_smiles(self):
+        """generate_conformer must succeed for disconnected SMILES."""
+        smi = "[F:1][F:2].[Cl:3][Cl:4]"
+        mol = cheminformatics.make_mol(smi)
+        mol = cheminformatics.generate_conformer(mol, smi, seed=0)
+        assert mol.GetNumConformers() == 1
+        _, coords = cheminformatics.get_coords_conformer(mol)
+        assert coords.shape == (4, 3)
+        assert np.all(np.isfinite(coords))
+
+    def test_seed_reproducibility(self):
+        """Same seed should produce the same conformer."""
+        smi = "[F:1][F:2]"
+        mol_a = cheminformatics.generate_conformer(cheminformatics.make_mol(smi), smi, seed=7)
+        mol_b = cheminformatics.generate_conformer(cheminformatics.make_mol(smi), smi, seed=7)
+        _, coords_a = cheminformatics.get_coords_conformer(mol_a)
+        _, coords_b = cheminformatics.get_coords_conformer(mol_b)
+        np.testing.assert_allclose(coords_a, coords_b, atol=1e-6)

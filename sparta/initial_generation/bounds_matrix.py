@@ -22,7 +22,9 @@ from sparta.initial_generation.dg_optimizer import optimize_to_bounds_matrix_and
 from sparta.iterative_alignment.force_propagation import transform_mol
 
 if TYPE_CHECKING:
+    import ase
     from sparta.reaction import Reaction
+    from sparta.calculation.base import Calculation
 
 
 def _generate_reaction_conformers_single(
@@ -159,7 +161,11 @@ def _generate_reaction_conformers_single(
 # Public high-level entry point
 # ---------------------------------------------------------------------------
 
-def generate_initial_conformers(reaction: "Reaction", n_workers: int = 1) -> "Reaction":
+def generate_initial_conformers(
+    reaction: "Reaction",
+    n_workers: int = 1,
+    calculator: "Optional[Calculation]" = None,
+) -> "Reaction":
     """
     Generate reactant/product conformer pairs for every (seed, stretch_factor)
     combination, score each pair with a quick NEB, and populate
@@ -175,6 +181,11 @@ def generate_initial_conformers(reaction: "Reaction", n_workers: int = 1) -> "Re
     n_workers : int
         Number of parallel worker processes for conformer scoring.  Set > 1
         to use ``concurrent.futures.ProcessPoolExecutor``.
+    calculator : Calculation, optional
+        If provided, optimise the seed-0 UFF reference conformers stored in
+        ``reaction.reac_ref_coords`` and ``reaction.prod_ref_coords`` and store
+        the results in ``reaction.reac_ref_optimized``, ``reaction.prod_ref_optimized``,
+        ``reaction.reac_ref_energy``, and ``reaction.prod_ref_energy``.
 
     Returns
     -------
@@ -237,4 +248,27 @@ def generate_initial_conformers(reaction: "Reaction", n_workers: int = 1) -> "Re
 
     reaction.all_conformers = valid
     reaction.top_k_conformers = valid[: reaction.top_k]
+
+    if calculator is not None:
+        import ase
+
+        reac_symbols = [
+            reaction.reactant_mol.GetAtomWithIdx(i).GetSymbol()
+            for i in range(reaction.reactant_mol.GetNumAtoms())
+        ]
+        prod_symbols = [
+            reaction.product_mol.GetAtomWithIdx(i).GetSymbol()
+            for i in range(reaction.product_mol.GetNumAtoms())
+        ]
+        reac_atoms = ase.Atoms(symbols=reac_symbols, positions=reaction.reac_ref_coords)
+        prod_atoms = ase.Atoms(symbols=prod_symbols, positions=reaction.prod_ref_coords)
+
+        reac_opt, reac_energy = calculator.optimize(reac_atoms)
+        prod_opt, prod_energy = calculator.optimize(prod_atoms)
+
+        reaction.reac_ref_optimized = reac_opt.get_positions()
+        reaction.prod_ref_optimized = prod_opt.get_positions()
+        reaction.reac_ref_energy = reac_energy
+        reaction.prod_ref_energy = prod_energy
+
     return reaction

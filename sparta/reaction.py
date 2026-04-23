@@ -116,6 +116,9 @@ class Reaction:
         _, reac_ref_coords = cheminformatics.get_coords_conformer(reac_ref)
         _, prod_ref_coords = cheminformatics.get_coords_conformer(prod_ref)
 
+        self.reac_ref_coords: np.ndarray = reac_ref_coords
+        self.prod_ref_coords: np.ndarray = prod_ref_coords
+
         self.reac_bond_lengths: Dict[Tuple[int, int], float] = {}
         self.prod_bond_lengths: Dict[Tuple[int, int], float] = {}
         for i, j in self.changing_bonds:
@@ -188,6 +191,17 @@ class Reaction:
         #   conformer_idx, stretch_factor, seed
         self.aligned_results: List[Dict] = []
 
+        # ── Calculator results (populated when a Calculation is supplied) ──
+        # Optimised ref conformer geometry and energy (from generate_initial_conformers)
+        self.reac_ref_optimized: Optional[np.ndarray] = None
+        self.prod_ref_optimized: Optional[np.ndarray] = None
+        self.reac_ref_energy: Optional[float] = None
+        self.prod_ref_energy: Optional[float] = None
+        # Single-point energies on the best aligned result (from run_iterative_alignment)
+        self.best_reac_sp_energy: Optional[float] = None
+        self.best_prod_sp_energy: Optional[float] = None
+        self.best_midpoint_sp_energy: Optional[float] = None
+
     # ── Internal helpers ──────────────────────────────────────────────────
 
     def _compute_changing_bonds(self) -> List[Tuple[int, int]]:
@@ -198,7 +212,11 @@ class Reaction:
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def generate_initial_conformers(self, n_workers: int = 1) -> "Reaction":
+    def generate_initial_conformers(
+        self,
+        n_workers: int = 1,
+        calculator=None,
+    ) -> "Reaction":
         """
         Generate reactant/product conformer pairs for every (seed, stretch_factor)
         combination, score each pair with a quick NEB, and populate
@@ -208,11 +226,15 @@ class Reaction:
         ----------
         n_workers : int
             Parallel worker processes for conformer scoring.
+        calculator : Calculation, optional
+            If provided, optimise the seed-0 UFF reference conformers and store
+            the optimised geometries and energies in ``reac_ref_optimized``,
+            ``prod_ref_optimized``, ``reac_ref_energy``, and ``prod_ref_energy``.
 
         Returns ``self`` to allow method chaining.
         """
         from sparta.initial_generation import generate_initial_conformers
-        return generate_initial_conformers(self, n_workers=n_workers)
+        return generate_initial_conformers(self, n_workers=n_workers, calculator=calculator)
 
     def run_iterative_alignment(
         self,
@@ -225,6 +247,7 @@ class Reaction:
         d_power: int = 4,
         verbose: bool = False,
         n_workers: int = 1,
+        calculator=None,
     ) -> "Reaction":
         """
         Run iterative IDPP path optimisation on each conformer in
@@ -254,6 +277,11 @@ class Reaction:
             Print progress for each conformer.
         n_workers : int
             Parallel worker processes for per-conformer alignment.
+        calculator : Calculation, optional
+            If provided, run single-point energy calculations on the endpoints
+            and highest-IDPP-energy image of the best aligned result, storing
+            results in ``best_reac_sp_energy``, ``best_prod_sp_energy``, and
+            ``best_midpoint_sp_energy``.
         """
         from sparta.iterative_alignment import run_iterative_alignment
         return run_iterative_alignment(
@@ -267,6 +295,7 @@ class Reaction:
             d_power=d_power,
             verbose=verbose,
             n_workers=n_workers,
+            calculator=calculator,
         )
 
     def find_optimal_stretch_factor(

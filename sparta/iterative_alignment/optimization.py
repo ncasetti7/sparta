@@ -27,6 +27,7 @@ from sparta.iterative_alignment.force_propagation import (
 from sparta.iterative_alignment.idpp import IDPP, create_idpp_calculators
 
 if TYPE_CHECKING:
+    from sparta.calculation.base import Calculation
     from sparta.reaction import Reaction
 
 
@@ -440,6 +441,7 @@ def run_iterative_alignment(
     d_power: int = 4,
     verbose: bool = False,
     n_workers: int = 1,
+    calculator: "Optional[Calculation]" = None,
 ) -> "Reaction":
     """
     Run iterative IDPP path optimisation on each conformer in
@@ -477,6 +479,11 @@ def run_iterative_alignment(
     n_workers : int
         Number of parallel worker processes.  Set > 1 to use
         ``concurrent.futures.ProcessPoolExecutor`` for parallel alignment.
+    calculator : Calculation, optional
+        If provided, run single-point energy calculations on the reactant and
+        product endpoints and the highest-IDPP-energy interior image of the
+        best aligned result, storing results in ``reaction.best_reac_sp_energy``,
+        ``reaction.best_prod_sp_energy``, and ``reaction.best_midpoint_sp_energy``.
 
     Returns
     -------
@@ -529,6 +536,27 @@ def run_iterative_alignment(
 
     results.sort(key=lambda r: r["score"])
     reaction.aligned_results = results
+
+    if calculator is not None and reaction.aligned_results:
+        import ase
+
+        best = reaction.aligned_results[0]
+        symbols = [
+            reaction.reactant_mol.GetAtomWithIdx(i).GetSymbol()
+            for i in range(reaction.reactant_mol.GetNumAtoms())
+        ]
+
+        reaction.best_reac_sp_energy = calculator.energy(
+            ase.Atoms(symbols=symbols, positions=best["reactant_coords"])
+        )
+        reaction.best_prod_sp_energy = calculator.energy(
+            ase.Atoms(symbols=symbols, positions=best["product_coords"])
+        )
+
+        interior_energies = best["energies"][1:-1]
+        max_interior_idx = int(np.argmax(interior_energies)) + 1
+        reaction.best_midpoint_sp_energy = calculator.energy(best["images"][max_interior_idx])
+
     return reaction
 
 
