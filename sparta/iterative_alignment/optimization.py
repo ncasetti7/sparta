@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Tuple
 import numpy as np
 
 from sparta.iterative_alignment.force_propagation import (
+    _pairwise_distances,
     apply_endpoint_adjustment,
     compute_endpoint_gradient_barrier,
     compute_endpoint_gradient_total,
@@ -91,6 +92,24 @@ def _build_neb_images(reactant_positions, product_positions, symbols, n_images):
         images.append(img)
     images.append(final)
     return images
+
+
+def _build_neb_images_warm(reactant_positions, product_positions, current_images, symbols):
+    """
+    Build NEB images with updated endpoints but interior positions warm-started
+    from current_images. Avoids re-interpolating from scratch after a small
+    endpoint perturbation, so FIRE converges in fewer steps.
+    """
+    import ase
+    n_images = len(current_images)
+    initial = ase.Atoms(symbols=symbols, positions=reactant_positions)
+    final = ase.Atoms(symbols=symbols, positions=product_positions)
+    new_images = [initial]
+    for k in range(1, n_images - 1):
+        img = ase.Atoms(symbols=symbols, positions=current_images[k].get_positions())
+        new_images.append(img)
+    new_images.append(final)
+    return new_images
 
 
 def _run_neb(images, n_images, fmax, steps, verbose):
@@ -219,6 +238,8 @@ def _run_alignment_single(
     d_power: int = 4,
     neb_fmax: float = 0.001,
     neb_steps: int = 200,
+    backtrack_fmax: Optional[float] = None,
+    backtrack_steps: Optional[int] = None,
     propagation_threshold: float = 0.0001,
     propagation_step_size: float = 2.0,
     max_iterations: int = 40,
@@ -251,6 +272,12 @@ def _run_alignment_single(
         Force convergence for each inner NEB run.
     neb_steps : int
         Maximum steps for each inner NEB run.
+    backtrack_fmax : float, optional
+        Force convergence for cheap backtracking NEB evaluations.
+        Defaults to ``neb_fmax * 10``.
+    backtrack_steps : int, optional
+        Maximum steps for cheap backtracking NEB evaluations.
+        Defaults to ``max(neb_steps // 4, 20)``.
     propagation_threshold : float
         Stop when max propagated force magnitude < this value.
     propagation_step_size : float
@@ -272,6 +299,11 @@ def _run_alignment_single(
         'score'            : float — max interior IDPP energy after optimisation
     """
     import ase
+
+    if backtrack_fmax is None:
+        backtrack_fmax = neb_fmax * 10.0
+    if backtrack_steps is None:
+        backtrack_steps = max(neb_steps // 4, 20)
 
     reactant_coords = conformer["reactant_coords"]
     product_coords = conformer["product_coords"]
@@ -302,16 +334,30 @@ def _run_alignment_single(
     current_step = propagation_step_size
     min_step = propagation_step_size * 0.01
 
+    # Endpoint distance matrices for the gradient functions. Invalidated after
+    # each accepted endpoint adjustment so they are recomputed once on next use.
+    d_initial_cache: Optional[np.ndarray] = None
+    d_final_cache: Optional[np.ndarray] = None
+
+    # Interior image positions from the last accepted backtracking NEB, used to
+    # warm-start the next Phase 2 NEB instead of re-interpolating from scratch.
+    warm_images: Optional[list] = None
+
     for iteration in range(max_iterations):
         if verbose:
             print(f"\n=== Iteration {iteration + 1}: Phase 2 — NEB with fixed endpoints ===")
 
-        # Phase 2: NEB with current endpoints
-        images = _build_neb_images(
-            reac_atoms.get_positions(),
-            prod_atoms.get_positions(),
-            symbols, n_images,
-        )
+        # Phase 2: NEB with current endpoints.
+        # Warm-start from the last accepted backtracking solution when available.
+        if warm_images is not None:
+            images = warm_images
+            warm_images = None
+        else:
+            images = _build_neb_images(
+                reac_atoms.get_positions(),
+                prod_atoms.get_positions(),
+                symbols, n_images,
+            )
         images, energies, _ = _run_neb(images, n_images, neb_fmax, neb_steps, verbose)
 
         interior = [e for e in energies[1:-1] if e is not None]
@@ -332,11 +378,22 @@ def _run_alignment_single(
             if verbose:
                 print(f"  Improved! Best: {best_score:.6f}")
 
-        # Phase 3: Compute propagated endpoint forces
+        # Phase 3: Compute propagated endpoint forces.
+        # Reuse cached endpoint distance matrices when endpoints haven't changed.
+        if d_initial_cache is None:
+            d_initial_cache = _pairwise_distances(reac_atoms.get_positions())
+            d_final_cache = _pairwise_distances(prod_atoms.get_positions())
+
         if objective == "total":
-            init_force, final_force = compute_endpoint_gradient_total(images, d_power)
+            init_force, final_force = compute_endpoint_gradient_total(
+                images, d_power,
+                d_initial=d_initial_cache, d_final=d_final_cache,
+            )
         else:
-            init_force, final_force, max_idx = compute_endpoint_gradient_barrier(images, d_power)
+            init_force, final_force, max_idx = compute_endpoint_gradient_barrier(
+                images, d_power,
+                d_initial=d_initial_cache, d_final=d_final_cache,
+            )
             if verbose:
                 print(f"  Gradient from image {max_idx}")
 
@@ -352,7 +409,10 @@ def _run_alignment_single(
                 print(f"  Converged (force {max_prop:.6f} < {propagation_threshold}).")
             break
 
-        # Try endpoint adjustment with backtracking step size
+        # Try endpoint adjustment with backtracking.
+        # Backtracking trials use a cheaper NEB (backtrack_fmax / backtrack_steps)
+        # with warm-started interior positions, so each trial is much faster.
+        # The full-quality NEB runs in the next Phase 2 after acceptance.
         accepted = False
         while current_step >= min_step:
             reac_pos_before = reac_atoms.get_positions().copy()
@@ -367,14 +427,14 @@ def _run_alignment_single(
                 step_size=current_step, max_displacement=current_step,
             )
 
-            # Evaluate with a quick NEB at the new endpoints
-            test_images = _build_neb_images(
+            # Cheap evaluation: warm-started interior + loose convergence
+            test_images = _build_neb_images_warm(
                 reac_atoms.get_positions(),
                 prod_atoms.get_positions(),
-                symbols, n_images,
+                images, symbols,
             )
             test_images, test_energies, _ = _run_neb(
-                test_images, n_images, neb_fmax, neb_steps, verbose=False
+                test_images, n_images, backtrack_fmax, backtrack_steps, verbose=False,
             )
             test_interior = [e for e in test_energies[1:-1] if e is not None]
             if objective == "total":
@@ -387,6 +447,11 @@ def _run_alignment_single(
                     print(f"  Accepted step {current_step:.4f}: {test_score:.6f} < {best_score:.6f}")
                 accepted = True
                 current_step = propagation_step_size  # reset after acceptance
+                # Warm-start next Phase 2 from this (cheap) NEB solution
+                warm_images = [img.copy() for img in test_images]
+                # Invalidate distance cache — endpoints have moved
+                d_initial_cache = None
+                d_final_cache = None
                 break
             else:
                 if verbose:
@@ -406,7 +471,7 @@ def _run_alignment_single(
         if verbose:
             print(f"Reached max iterations ({max_iterations}).")
 
-    # Final NEB with best endpoints
+    # Final NEB with best endpoints (full quality, fresh linear interpolation)
     reac_atoms.set_positions(best_reac_pos)
     prod_atoms.set_positions(best_prod_pos)
     if verbose:
@@ -434,6 +499,8 @@ def run_iterative_alignment(
     reaction: "Reaction",
     neb_fmax: float = 0.001,
     neb_steps: int = 200,
+    backtrack_fmax: Optional[float] = None,
+    backtrack_steps: Optional[int] = None,
     propagation_threshold: float = 0.0001,
     propagation_step_size: float = 2.0,
     max_iterations: int = 40,
@@ -463,6 +530,12 @@ def run_iterative_alignment(
         Force convergence criterion for each inner NEB run.
     neb_steps : int
         Maximum steps per inner NEB run.
+    backtrack_fmax : float, optional
+        Force convergence for cheap backtracking NEB evaluations.
+        Defaults to ``neb_fmax * 10``.
+    backtrack_steps : int, optional
+        Maximum steps for cheap backtracking NEB evaluations.
+        Defaults to ``max(neb_steps // 4, 20)``.
     propagation_threshold : float
         Stop iterating when the max propagated force falls below this value.
     propagation_step_size : float
@@ -505,6 +578,8 @@ def run_iterative_alignment(
         d_power=d_power,
         neb_fmax=neb_fmax,
         neb_steps=neb_steps,
+        backtrack_fmax=backtrack_fmax,
+        backtrack_steps=backtrack_steps,
         propagation_threshold=propagation_threshold,
         propagation_step_size=propagation_step_size,
         max_iterations=max_iterations,
@@ -572,6 +647,8 @@ def find_optimal_stretch_factor(
     n_workers: int = 1,
     neb_fmax: float = 0.001,
     neb_steps: int = 200,
+    backtrack_fmax: Optional[float] = None,
+    backtrack_steps: Optional[int] = None,
     propagation_threshold: float = 0.0001,
     propagation_step_size: float = 2.0,
     max_iterations: int = 40,
@@ -602,7 +679,8 @@ def find_optimal_stretch_factor(
     n_workers : int
         Parallel worker processes passed to ``generate_initial_conformers``
         and ``run_iterative_alignment``.
-    neb_fmax, neb_steps, propagation_threshold, propagation_step_size,
+    neb_fmax, neb_steps, backtrack_fmax, backtrack_steps,
+    propagation_threshold, propagation_step_size,
     max_iterations, objective, d_power, verbose :
         Alignment hyperparameters forwarded to ``run_iterative_alignment``.
 
@@ -623,6 +701,8 @@ def find_optimal_stretch_factor(
     alignment_kwargs = dict(
         neb_fmax=neb_fmax,
         neb_steps=neb_steps,
+        backtrack_fmax=backtrack_fmax,
+        backtrack_steps=backtrack_steps,
         propagation_threshold=propagation_threshold,
         propagation_step_size=propagation_step_size,
         max_iterations=max_iterations,

@@ -100,6 +100,35 @@ class TestIDPP:
         e2 = atoms2.get_potential_energy()
         assert e4 != e2
 
+    def test_forces_match_finite_differences(self):
+        """Analytic forces must equal -dE/dr from central finite differences."""
+        np.random.seed(42)
+        n = 6
+        initial = np.random.randn(n, 3)
+        final = np.random.randn(n, 3)
+        pos = np.random.randn(n, 3)
+
+        calc = IDPP(initial, final, alpha=0.4, d_power=4)
+        calc.calculate(
+            ase.Atoms(symbols=["H"] * n, positions=pos.copy()),
+            properties=["energy", "forces"],
+        )
+        F_analytic = calc.results["forces"].copy()
+
+        eps = 1e-5
+        F_fd = np.zeros_like(pos)
+        for i in range(n):
+            for c in range(3):
+                pp = pos.copy(); pp[i, c] += eps
+                pm = pos.copy(); pm[i, c] -= eps
+                calc.calculate(ase.Atoms(symbols=["H"] * n, positions=pp), properties=["energy"])
+                Ep = calc.results["energy"]
+                calc.calculate(ase.Atoms(symbols=["H"] * n, positions=pm), properties=["energy"])
+                Em = calc.results["energy"]
+                F_fd[i, c] = -(Ep - Em) / (2 * eps)
+
+        np.testing.assert_allclose(F_analytic, F_fd, atol=1e-6)
+
 
 # ---------------------------------------------------------------------------
 # create_idpp_calculators

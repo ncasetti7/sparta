@@ -178,6 +178,12 @@ class TestASECalculation:
         opt_atoms, _ = ASECalculation(lj_calculator).optimize(h2_near_eq)
         assert opt_atoms.get_chemical_symbols() == h2_near_eq.get_chemical_symbols()
 
+    def test_optimize_energy_lower_than_input(self, lj_calculator, h2_near_eq):
+        """Optimised energy should be lower than the input single-point energy."""
+        input_energy = ASECalculation(lj_calculator).energy(h2_near_eq)
+        _, opt_energy = ASECalculation(lj_calculator).optimize(h2_near_eq)
+        assert opt_energy < input_energy
+
 
 # ---------------------------------------------------------------------------
 # TestXTBCalculation
@@ -372,3 +378,87 @@ class TestXTBCalculation:
         atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.9]])
         XTBCalculation().optimize(atoms)
         assert not os.path.exists(tmpdir)
+
+    @patch("sparta.calculation.xtb_calc.subprocess.run")
+    @patch("sparta.calculation.xtb_calc.tempfile.mkdtemp")
+    def test_optimize_tempdir_cleaned_up_on_failure(self, mock_mkdtemp, mock_run, tmp_path):
+        tmpdir = str(tmp_path / "xtb_opt_fail")
+        os.makedirs(tmpdir)
+        mock_mkdtemp.return_value = tmpdir
+        mock_run.return_value = _mock_xtb_sp(returncode=1, stderr="fatal")
+
+        atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.9]])
+        with pytest.raises(RuntimeError):
+            XTBCalculation().optimize(atoms)
+        assert not os.path.exists(tmpdir)
+
+    @patch("sparta.calculation.xtb_calc.subprocess.run")
+    def test_optimize_raises_on_nonzero_returncode(self, mock_run):
+        mock_run.return_value = _mock_xtb_sp(returncode=1, stderr="fatal error")
+        atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.9]])
+        with pytest.raises(RuntimeError, match="xtb exited"):
+            XTBCalculation().optimize(atoms)
+
+    @patch("sparta.calculation.xtb_calc.subprocess.run")
+    def test_optimize_uses_gxtb_flag(self, mock_run, tmp_path):
+        opt_atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.8]])
+
+        def side_effect(cmd, **kwargs):
+            ase.io.write(os.path.join(kwargs["cwd"], "xtbopt.xyz"), opt_atoms, format="xyz")
+            return MagicMock(returncode=0, stdout=XTB_OUTPUT, stderr="")
+
+        mock_run.side_effect = side_effect
+        atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.9]])
+        XTBCalculation().optimize(atoms)
+        cmd = mock_run.call_args[0][0]
+        assert "--gxtb" in cmd
+
+    @patch("sparta.calculation.xtb_calc.subprocess.run")
+    def test_optimize_passes_correct_charge(self, mock_run, tmp_path):
+        opt_atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.8]])
+
+        def side_effect(cmd, **kwargs):
+            ase.io.write(os.path.join(kwargs["cwd"], "xtbopt.xyz"), opt_atoms, format="xyz")
+            return MagicMock(returncode=0, stdout=XTB_OUTPUT, stderr="")
+
+        mock_run.side_effect = side_effect
+        atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.9]])
+        XTBCalculation(charge=-1).optimize(atoms)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index("--chrg") + 1] == "-1"
+
+    @patch("sparta.calculation.xtb_calc.subprocess.run")
+    def test_optimize_passes_correct_uhf(self, mock_run, tmp_path):
+        opt_atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.8]])
+
+        def side_effect(cmd, **kwargs):
+            ase.io.write(os.path.join(kwargs["cwd"], "xtbopt.xyz"), opt_atoms, format="xyz")
+            return MagicMock(returncode=0, stdout=XTB_OUTPUT, stderr="")
+
+        mock_run.side_effect = side_effect
+        atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.9]])
+        XTBCalculation(multiplicity=3).optimize(atoms)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index("--uhf") + 1] == "2"
+
+    @patch("sparta.calculation.xtb_calc.subprocess.run")
+    def test_energy_does_not_mutate_atoms(self, mock_run):
+        mock_run.return_value = _mock_xtb_sp()
+        atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.9]])
+        original_pos = atoms.get_positions().copy()
+        XTBCalculation().energy(atoms)
+        np.testing.assert_array_equal(atoms.get_positions(), original_pos)
+
+    @patch("sparta.calculation.xtb_calc.subprocess.run")
+    def test_optimize_does_not_mutate_input(self, mock_run):
+        opt_atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.8]])
+
+        def side_effect(cmd, **kwargs):
+            ase.io.write(os.path.join(kwargs["cwd"], "xtbopt.xyz"), opt_atoms, format="xyz")
+            return MagicMock(returncode=0, stdout=XTB_OUTPUT, stderr="")
+
+        mock_run.side_effect = side_effect
+        atoms = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.9]])
+        original_pos = atoms.get_positions().copy()
+        XTBCalculation().optimize(atoms)
+        np.testing.assert_array_equal(atoms.get_positions(), original_pos)

@@ -9,11 +9,17 @@ Also contains endpoint gradient computation and adjustment used during
 iterative NEB optimisation.
 """
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import rdMolTransforms
+
+
+def _pairwise_distances(pos: np.ndarray) -> np.ndarray:
+    """Compute symmetric (n, n) pairwise distance matrix from (n, 3) positions."""
+    diff = pos[:, None, :] - pos[None, :, :]
+    return np.sqrt((diff * diff).sum(axis=-1))
 
 
 def _get_connected_fragment(
@@ -132,7 +138,12 @@ def transform_mol(
 # Endpoint gradient computation (chain rule through IDPP target distances)
 # ---------------------------------------------------------------------------
 
-def compute_endpoint_gradient_total(images: list, d_power: int = 4):
+def compute_endpoint_gradient_total(
+    images: list,
+    d_power: int = 4,
+    d_initial: Optional[np.ndarray] = None,
+    d_final: Optional[np.ndarray] = None,
+):
     """
     Gradient of total interior IDPP energy w.r.t. endpoint positions.
 
@@ -149,6 +160,11 @@ def compute_endpoint_gradient_total(images: list, d_power: int = 4):
         Full NEB image list including endpoints.
     d_power : int
         IDPP distance weighting exponent.
+    d_initial : np.ndarray, optional
+        Pre-computed (n, n) pairwise distance matrix for images[0]. Computed
+        internally when None. Pass a cached value to avoid recomputation.
+    d_final : np.ndarray, optional
+        Pre-computed (n, n) pairwise distance matrix for images[-1].
 
     Returns
     -------
@@ -159,46 +175,51 @@ def compute_endpoint_gradient_total(images: list, d_power: int = 4):
     initial_pos = images[0].get_positions()
     final_pos = images[-1].get_positions()
 
-    d_initial = np.zeros((n_atoms, n_atoms))
-    d_final = np.zeros((n_atoms, n_atoms))
-    for i in range(n_atoms):
-        for j in range(i + 1, n_atoms):
-            d_initial[i, j] = d_initial[j, i] = np.linalg.norm(initial_pos[j] - initial_pos[i])
-            d_final[i, j] = d_final[j, i] = np.linalg.norm(final_pos[j] - final_pos[i])
+    if d_initial is None:
+        d_initial = _pairwise_distances(initial_pos)
+    if d_final is None:
+        d_final = _pairwise_distances(final_pos)
+
+    i_idx, j_idx = np.triu_indices(n_atoms, k=1)
+    d_i_vals = d_initial[i_idx, j_idx]   # (n_pairs,)
+    d_f_vals = d_final[i_idx, j_idx]     # (n_pairs,)
+
+    # Precompute endpoint diff vectors — constant across all images
+    valid_i = d_i_vals > 1e-10
+    valid_f = d_f_vals > 1e-10
+    safe_di = np.where(valid_i, d_i_vals, 1.0)
+    safe_df = np.where(valid_f, d_f_vals, 1.0)
+    diff_initial = initial_pos[i_idx] - initial_pos[j_idx]  # (n_pairs, 3)
+    diff_final = final_pos[i_idx] - final_pos[j_idx]        # (n_pairs, 3)
 
     init_force = np.zeros((n_atoms, 3))
     final_force = np.zeros((n_atoms, 3))
 
     for img_idx in range(1, n_images - 1):
         alpha = img_idx / (n_images - 1)
-        cur = images[img_idx].get_positions()
-        d_cur = np.zeros((n_atoms, n_atoms))
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                d_cur[i, j] = d_cur[j, i] = np.linalg.norm(cur[j] - cur[i])
-        d_target = (1.0 - alpha) * d_initial + alpha * d_final
+        cur_pos = images[img_idx].get_positions()
+        d_cur_mat = _pairwise_distances(cur_pos)
+        d_target_mat = (1.0 - alpha) * d_initial + alpha * d_final
 
-        for j in range(n_atoms):
-            for k in range(j + 1, n_atoms):
-                d_t = d_target[j, k]
-                if d_t < 1e-10:
-                    continue
-                w = 1.0 / (d_t ** d_power)
-                err = d_cur[j, k] - d_t
+        d_t_vals = d_target_mat[i_idx, j_idx]
+        d_c_vals = d_cur_mat[i_idx, j_idx]
 
-                d_i_jk = d_initial[j, k]
-                if d_i_jk > 1e-10:
-                    dir_init = (initial_pos[j] - initial_pos[k]) / d_i_jk
-                    mag = 2.0 * w * err * (1.0 - alpha)
-                    init_force[j] += mag * dir_init
-                    init_force[k] -= mag * dir_init
+        valid = d_t_vals > 1e-10
+        safe_dt = np.where(valid, d_t_vals, 1.0)
+        w = np.where(valid, 1.0 / (safe_dt ** d_power), 0.0)
+        err = d_c_vals - d_t_vals
 
-                d_f_jk = d_final[j, k]
-                if d_f_jk > 1e-10:
-                    dir_fin = (final_pos[j] - final_pos[k]) / d_f_jk
-                    mag = 2.0 * w * err * alpha
-                    final_force[j] += mag * dir_fin
-                    final_force[k] -= mag * dir_fin
+        mag_i = np.where(valid & valid_i,
+                         2.0 * w * err * (1.0 - alpha) / safe_di, 0.0)
+        contrib_i = mag_i[:, None] * diff_initial
+        np.add.at(init_force, i_idx, contrib_i)
+        np.add.at(init_force, j_idx, -contrib_i)
+
+        mag_f = np.where(valid & valid_f,
+                         2.0 * w * err * alpha / safe_df, 0.0)
+        contrib_f = mag_f[:, None] * diff_final
+        np.add.at(final_force, i_idx, contrib_f)
+        np.add.at(final_force, j_idx, -contrib_f)
 
     max_f = max(
         np.linalg.norm(init_force, axis=1).max(),
@@ -211,7 +232,12 @@ def compute_endpoint_gradient_total(images: list, d_power: int = 4):
     return init_force, final_force
 
 
-def compute_endpoint_gradient_barrier(images: list, d_power: int = 4):
+def compute_endpoint_gradient_barrier(
+    images: list,
+    d_power: int = 4,
+    d_initial: Optional[np.ndarray] = None,
+    d_final: Optional[np.ndarray] = None,
+):
     """
     Gradient of the MAX interior IDPP energy w.r.t. endpoint positions.
 
@@ -224,6 +250,10 @@ def compute_endpoint_gradient_barrier(images: list, d_power: int = 4):
         Full NEB image list including endpoints.
     d_power : int
         IDPP distance weighting exponent.
+    d_initial : np.ndarray, optional
+        Pre-computed (n, n) pairwise distance matrix for images[0].
+    d_final : np.ndarray, optional
+        Pre-computed (n, n) pairwise distance matrix for images[-1].
 
     Returns
     -------
@@ -236,64 +266,68 @@ def compute_endpoint_gradient_barrier(images: list, d_power: int = 4):
     initial_pos = images[0].get_positions()
     final_pos = images[-1].get_positions()
 
-    d_initial = np.zeros((n_atoms, n_atoms))
-    d_final = np.zeros((n_atoms, n_atoms))
-    for i in range(n_atoms):
-        for j in range(i + 1, n_atoms):
-            d_initial[i, j] = d_initial[j, i] = np.linalg.norm(initial_pos[j] - initial_pos[i])
-            d_final[i, j] = d_final[j, i] = np.linalg.norm(final_pos[j] - final_pos[i])
+    if d_initial is None:
+        d_initial = _pairwise_distances(initial_pos)
+    if d_final is None:
+        d_final = _pairwise_distances(final_pos)
 
-    # Find max-energy interior image
+    i_idx, j_idx = np.triu_indices(n_atoms, k=1)
+
+    # Find max-energy interior image (vectorized energy per image)
     max_energy = -float("inf")
     max_img_idx = 1
     for img_idx in range(1, n_images - 1):
         alpha = img_idx / (n_images - 1)
-        cur = images[img_idx].get_positions()
-        d_target = (1.0 - alpha) * d_initial + alpha * d_final
-        energy = 0.0
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                d_c = np.linalg.norm(cur[j] - cur[i])
-                d_t = d_target[i, j]
-                if d_t > 1e-10:
-                    energy += (d_c - d_t) ** 2 / (d_t ** d_power)
+        cur_pos = images[img_idx].get_positions()
+        d_cur_mat = _pairwise_distances(cur_pos)
+        d_target_mat = (1.0 - alpha) * d_initial + alpha * d_final
+
+        d_t_vals = d_target_mat[i_idx, j_idx]
+        d_c_vals = d_cur_mat[i_idx, j_idx]
+
+        valid = d_t_vals > 1e-10
+        safe_dt = np.where(valid, d_t_vals, 1.0)
+        w = np.where(valid, 1.0 / (safe_dt ** d_power), 0.0)
+        energy = float(np.sum(w * (d_c_vals - d_t_vals) ** 2))
+
         if energy > max_energy:
             max_energy = energy
             max_img_idx = img_idx
 
-    # Gradient from max image only
+    # Gradient from max-energy image only
     alpha = max_img_idx / (n_images - 1)
-    cur = images[max_img_idx].get_positions()
-    d_cur = np.zeros((n_atoms, n_atoms))
-    for i in range(n_atoms):
-        for j in range(i + 1, n_atoms):
-            d_cur[i, j] = d_cur[j, i] = np.linalg.norm(cur[j] - cur[i])
-    d_target = (1.0 - alpha) * d_initial + alpha * d_final
+    cur_pos = images[max_img_idx].get_positions()
+    d_cur_mat = _pairwise_distances(cur_pos)
+    d_target_mat = (1.0 - alpha) * d_initial + alpha * d_final
+
+    d_t_vals = d_target_mat[i_idx, j_idx]
+    d_c_vals = d_cur_mat[i_idx, j_idx]
+    d_i_vals = d_initial[i_idx, j_idx]
+    d_f_vals = d_final[i_idx, j_idx]
+
+    valid = d_t_vals > 1e-10
+    safe_dt = np.where(valid, d_t_vals, 1.0)
+    w = np.where(valid, 1.0 / (safe_dt ** d_power), 0.0)
+    err = d_c_vals - d_t_vals
 
     init_force = np.zeros((n_atoms, 3))
     final_force = np.zeros((n_atoms, 3))
 
-    for j in range(n_atoms):
-        for k in range(j + 1, n_atoms):
-            d_t = d_target[j, k]
-            if d_t < 1e-10:
-                continue
-            w = 1.0 / (d_t ** d_power)
-            err = d_cur[j, k] - d_t
+    valid_i = valid & (d_i_vals > 1e-10)
+    safe_di = np.where(d_i_vals > 1e-10, d_i_vals, 1.0)
+    mag_i = np.where(valid_i, 2.0 * w * err * (1.0 - alpha) / safe_di, 0.0)
+    diff_initial = initial_pos[i_idx] - initial_pos[j_idx]
+    contrib_i = mag_i[:, None] * diff_initial
+    np.add.at(init_force, i_idx, contrib_i)
+    np.add.at(init_force, j_idx, -contrib_i)
 
-            d_i_jk = d_initial[j, k]
-            if d_i_jk > 1e-10:
-                dir_init = (initial_pos[j] - initial_pos[k]) / d_i_jk
-                mag = 2.0 * w * err * (1.0 - alpha)
-                init_force[j] += mag * dir_init
-                init_force[k] -= mag * dir_init
-
-            d_f_jk = d_final[j, k]
-            if d_f_jk > 1e-10:
-                dir_fin = (final_pos[j] - final_pos[k]) / d_f_jk
-                mag = 2.0 * w * err * alpha
-                final_force[j] += mag * dir_fin
-                final_force[k] -= mag * dir_fin
+    valid_f = valid & (d_f_vals > 1e-10)
+    safe_df = np.where(d_f_vals > 1e-10, d_f_vals, 1.0)
+    mag_f = np.where(valid_f, 2.0 * w * err * alpha / safe_df, 0.0)
+    diff_final = final_pos[i_idx] - final_pos[j_idx]
+    contrib_f = mag_f[:, None] * diff_final
+    np.add.at(final_force, i_idx, contrib_f)
+    np.add.at(final_force, j_idx, -contrib_f)
 
     max_f = max(
         np.linalg.norm(init_force, axis=1).max(),
@@ -344,28 +378,38 @@ def apply_endpoint_adjustment(
 
     new_pos = orig + step_size * force
 
-    # Iterative projection onto bounds constraints
+    # Precompute pair indices and bound values (constant across projection iters)
+    i_idx, j_idx = np.triu_indices(n_atoms, k=1)
+    lo_pairs = bounds_lower[i_idx, j_idx]
+    hi_pairs = bounds_upper[i_idx, j_idx]
+
+    # Jacobi-style iterative projection onto distance bounds
     for _ in range(50):
-        fixed = 0
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                d = np.linalg.norm(new_pos[j] - new_pos[i])
-                lo = bounds_lower[i, j]
-                hi = bounds_upper[i, j]
-                if d < lo and lo > 0 and d > 1e-10:
-                    direction = (new_pos[j] - new_pos[i]) / d
-                    correction = (lo - d) / 2.0
-                    new_pos[i] -= correction * direction
-                    new_pos[j] += correction * direction
-                    fixed += 1
-                elif d > hi and hi > 0:
-                    direction = (new_pos[j] - new_pos[i]) / d
-                    correction = (d - hi) / 2.0
-                    new_pos[i] += correction * direction
-                    new_pos[j] -= correction * direction
-                    fixed += 1
-        if fixed == 0:
+        vec = new_pos[j_idx] - new_pos[i_idx]          # (n_pairs, 3), points i→j
+        d = np.sqrt((vec * vec).sum(axis=-1))            # (n_pairs,)
+
+        lower_viol = (d < lo_pairs) & (lo_pairs > 0) & (d > 1e-10)
+        upper_viol = (d > hi_pairs) & (hi_pairs > 0)
+
+        if not (lower_viol.any() or upper_viol.any()):
             break
+
+        safe_d = np.where(d > 1e-10, d, 1.0)
+        unit = vec / safe_d[:, None]                     # (n_pairs, 3)
+
+        # Half-step corrections toward constraint satisfaction
+        corr_lower = np.where(lower_viol, (lo_pairs - d) / 2.0, 0.0)
+        corr_upper = np.where(upper_viol, (d - hi_pairs) / 2.0, 0.0)
+
+        # delta_i[p] moves atom i_idx[p]:
+        #   lower viol → away from j  (-corr_lower * unit)
+        #   upper viol → toward j     (+corr_upper * unit)
+        delta_i = (corr_upper - corr_lower)[:, None] * unit  # (n_pairs, 3)
+
+        displacement = np.zeros_like(new_pos)
+        np.add.at(displacement, i_idx, delta_i)
+        np.add.at(displacement, j_idx, -delta_i)
+        new_pos += displacement
 
     # Hard cap: total displacement from original ≤ max_displacement
     total_disp = new_pos - orig

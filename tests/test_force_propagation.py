@@ -6,6 +6,7 @@ import ase
 
 from sparta.iterative_alignment.force_propagation import (
     _get_connected_fragment,
+    _pairwise_distances,
     apply_endpoint_adjustment,
     bond_change,
     compute_endpoint_gradient_barrier,
@@ -13,6 +14,34 @@ from sparta.iterative_alignment.force_propagation import (
     transform_mol,
 )
 from sparta.cheminformatics import make_mol, add_coords_to_mol
+
+
+# ---------------------------------------------------------------------------
+# _pairwise_distances
+# ---------------------------------------------------------------------------
+
+class TestPairwiseDistances:
+    def test_diagonal_is_zero(self):
+        pos = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+        d = _pairwise_distances(pos)
+        np.testing.assert_array_equal(np.diag(d), np.zeros(3))
+
+    def test_known_distance(self):
+        pos = np.array([[0.0, 0.0, 0.0], [3.0, 4.0, 0.0]])  # 3-4-5 triangle
+        d = _pairwise_distances(pos)
+        assert abs(d[0, 1] - 5.0) < 1e-10
+        assert abs(d[1, 0] - 5.0) < 1e-10
+
+    def test_symmetric(self):
+        np.random.seed(1)
+        pos = np.random.randn(6, 3)
+        d = _pairwise_distances(pos)
+        np.testing.assert_array_equal(d, d.T)
+
+    def test_shape(self):
+        pos = np.random.randn(7, 3)
+        d = _pairwise_distances(pos)
+        assert d.shape == (7, 7)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +214,68 @@ class TestEndpointGradientBarrier:
 
 
 # ---------------------------------------------------------------------------
+# Gradient caching (d_initial / d_final optional args)
+# ---------------------------------------------------------------------------
+
+def _linear_images_with_perturbation():
+    """5-image path where image 2 deviates from linear interpolation."""
+    initial = np.array([[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]])
+    final = np.array([[0.0, 0.0, 0.0], [2.8, 0.0, 0.0]])
+    images = []
+    for k in range(5):
+        alpha = k / 4
+        pos = (1 - alpha) * initial + alpha * final
+        if k == 2:
+            pos = pos + np.array([[0.3, 0.0, 0.0], [-0.3, 0.0, 0.0]])
+        images.append(ase.Atoms(symbols=["F", "F"], positions=pos.copy()))
+    return images, initial, final
+
+
+class TestEndpointGradientCaching:
+    def test_total_cached_equals_uncached(self):
+        images, initial, final = _linear_images_with_perturbation()
+        fi, ff = compute_endpoint_gradient_total(images)
+        d_i = _pairwise_distances(initial)
+        d_f = _pairwise_distances(final)
+        fi_c, ff_c = compute_endpoint_gradient_total(images, d_initial=d_i, d_final=d_f)
+        np.testing.assert_allclose(fi, fi_c, atol=1e-12)
+        np.testing.assert_allclose(ff, ff_c, atol=1e-12)
+
+    def test_barrier_cached_equals_uncached(self):
+        images, initial, final = _linear_images_with_perturbation()
+        fi, ff, idx = compute_endpoint_gradient_barrier(images)
+        d_i = _pairwise_distances(initial)
+        d_f = _pairwise_distances(final)
+        fi_c, ff_c, idx_c = compute_endpoint_gradient_barrier(
+            images, d_initial=d_i, d_final=d_f
+        )
+        np.testing.assert_allclose(fi, fi_c, atol=1e-12)
+        np.testing.assert_allclose(ff, ff_c, atol=1e-12)
+        assert idx == idx_c
+
+
+# ---------------------------------------------------------------------------
+# compute_endpoint_gradient_barrier — max-index correctness
+# ---------------------------------------------------------------------------
+
+class TestEndpointGradientBarrierMaxIdx:
+    def test_max_index_identifies_highest_energy_image(self):
+        """max_img_idx must point to the image with the largest IDPP energy."""
+        initial = np.array([[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]])
+        final = np.array([[0.0, 0.0, 0.0], [2.8, 0.0, 0.0]])
+        images = []
+        for k in range(5):
+            alpha = k / 4
+            pos = (1 - alpha) * initial + alpha * final
+            # Image 3 has a large deviation — should be the barrier
+            if k == 3:
+                pos = pos + np.array([[1.0, 0.5, 0.0], [-1.0, -0.5, 0.0]])
+            images.append(ase.Atoms(symbols=["F", "F"], positions=pos.copy()))
+        _, _, idx = compute_endpoint_gradient_barrier(images)
+        assert idx == 3
+
+
+# ---------------------------------------------------------------------------
 # apply_endpoint_adjustment
 # ---------------------------------------------------------------------------
 
@@ -211,7 +302,7 @@ class TestApplyEndpointAdjustment:
         result = apply_endpoint_adjustment(atoms, force, lo, hi, step_size=0.1)
         assert isinstance(result, float)
 
-    def test_bounds_respected(self):
+    def test_upper_bound_respected(self):
         """Atoms should not violate a tight upper bound after adjustment."""
         pos = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
         atoms = ase.Atoms(symbols=["F", "F"], positions=pos.copy())
@@ -222,3 +313,27 @@ class TestApplyEndpointAdjustment:
         apply_endpoint_adjustment(atoms, force, lo, hi, step_size=2.0)
         new_d = np.linalg.norm(atoms.get_positions()[1] - atoms.get_positions()[0])
         assert new_d <= 1.21  # allow small numerical tolerance
+
+    def test_lower_bound_respected(self):
+        """Atoms that start too close should be pushed apart to satisfy lower bound."""
+        pos = np.array([[0.0, 0.0, 0.0], [0.4, 0.0, 0.0]])  # distance = 0.4
+        atoms = ase.Atoms(symbols=["F", "F"], positions=pos.copy())
+        force = np.zeros((2, 3))  # no driving force — bounds projection only
+        n = 2
+        lo = np.array([[0.0, 1.5], [1.5, 0.0]])  # require distance >= 1.5
+        hi = np.full((n, n), 10.0)
+        apply_endpoint_adjustment(atoms, force, lo, hi, step_size=0.0, max_displacement=5.0)
+        new_d = np.linalg.norm(atoms.get_positions()[1] - atoms.get_positions()[0])
+        assert new_d >= 1.5 - 1e-6
+
+    def test_max_displacement_cap(self):
+        """No atom should move further than max_displacement from its start."""
+        pos = np.array([[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]])
+        atoms = ase.Atoms(symbols=["F", "F"], positions=pos.copy())
+        force = np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])  # push apart
+        lo = np.zeros((2, 2))
+        hi = np.full((2, 2), 100.0)  # loose bounds
+        max_d = 0.3
+        apply_endpoint_adjustment(atoms, force, lo, hi, step_size=5.0, max_displacement=max_d)
+        per_atom = np.linalg.norm(atoms.get_positions() - pos, axis=1)
+        assert per_atom.max() <= max_d + 1e-8

@@ -9,6 +9,7 @@ from sparta import Reaction
 from sparta.initial_generation.bounds_matrix import generate_initial_conformers
 from sparta.iterative_alignment.optimization import (
     _build_neb_images,
+    _build_neb_images_warm,
     _extract_symmetric_bounds,
     _relax_bounds_to_structure,
     _run_alignment_single,
@@ -120,6 +121,16 @@ class TestRunAlignmentSingle:
         result = _run_alignment_single(rxn_with_conformers, c, objective="total", **FAST_KWARGS)
         assert np.isfinite(result["score"])
 
+    def test_custom_backtrack_params_accepted(self, rxn_with_conformers):
+        """backtrack_fmax and backtrack_steps should be forwarded without error."""
+        c = rxn_with_conformers.top_k_conformers[0]
+        result = _run_alignment_single(
+            rxn_with_conformers, c,
+            backtrack_fmax=0.05, backtrack_steps=3,
+            **FAST_KWARGS,
+        )
+        assert np.isfinite(result["score"])
+
 
 # ---------------------------------------------------------------------------
 # run_iterative_alignment (high-level)
@@ -149,6 +160,15 @@ class TestRunIterativeAlignment:
             assert "conformer_idx" in result
             assert "stretch_factor" in result
             assert "seed" in result
+
+    def test_custom_backtrack_params_accepted(self, rxn_with_conformers):
+        """backtrack_fmax and backtrack_steps should be forwarded without error."""
+        rxn = run_iterative_alignment(
+            rxn_with_conformers,
+            backtrack_fmax=0.05, backtrack_steps=3,
+            **FAST_KWARGS,
+        )
+        assert len(rxn.aligned_results) > 0
 
     def test_raises_on_empty_top_k(self):
         r = Reaction(
@@ -274,6 +294,60 @@ class TestBuildNebImages:
         images = _build_neb_images(pos1, pos2, symbols, n_images=3)
         for img in images:
             assert isinstance(img, ase.Atoms)
+
+
+# ---------------------------------------------------------------------------
+# _build_neb_images_warm
+# ---------------------------------------------------------------------------
+
+class TestBuildNebImagesWarm:
+    def _make_current_images(self, n_images=5):
+        symbols = ["F", "F"]
+        images = [
+            ase.Atoms(symbols=symbols, positions=np.array([[float(k), 0.0, 0.0],
+                                                            [float(k) + 1.0, 0.0, 0.0]]))
+            for k in range(n_images)
+        ]
+        return images, symbols
+
+    def test_image_count_preserved(self):
+        images, symbols = self._make_current_images(7)
+        new_images = _build_neb_images_warm(np.zeros((2, 3)), np.zeros((2, 3)), images, symbols)
+        assert len(new_images) == 7
+
+    def test_endpoint_positions_updated(self):
+        images, symbols = self._make_current_images()
+        new_reac = np.array([[10.0, 0.0, 0.0], [11.0, 0.0, 0.0]])
+        new_prod = np.array([[20.0, 0.0, 0.0], [21.0, 0.0, 0.0]])
+        new_images = _build_neb_images_warm(new_reac, new_prod, images, symbols)
+        np.testing.assert_allclose(new_images[0].get_positions(), new_reac)
+        np.testing.assert_allclose(new_images[-1].get_positions(), new_prod)
+
+    def test_interior_positions_preserved(self):
+        images, symbols = self._make_current_images()
+        new_reac = images[0].get_positions().copy()
+        new_prod = images[-1].get_positions().copy()
+        new_images = _build_neb_images_warm(new_reac, new_prod, images, symbols)
+        for k in range(1, len(images) - 1):
+            np.testing.assert_allclose(
+                new_images[k].get_positions(), images[k].get_positions()
+            )
+
+    def test_interior_differs_from_linear_interpolation(self):
+        """Interior positions must come from current_images, not be re-interpolated."""
+        symbols = ["F", "F"]
+        reac = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        prod = np.array([[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+        off_path = np.array([[9.0, 9.0, 0.0], [10.0, 9.0, 0.0]])
+        current = [
+            ase.Atoms(symbols=symbols, positions=reac),
+            ase.Atoms(symbols=symbols, positions=off_path),
+            ase.Atoms(symbols=symbols, positions=prod),
+        ]
+        warm = _build_neb_images_warm(reac, prod, current, symbols)
+        linear = _build_neb_images(reac, prod, symbols, 3)
+        assert not np.allclose(warm[1].get_positions(), linear[1].get_positions())
+        np.testing.assert_allclose(warm[1].get_positions(), off_path)
 
 
 # ---------------------------------------------------------------------------

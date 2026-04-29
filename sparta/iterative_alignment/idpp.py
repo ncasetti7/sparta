@@ -64,17 +64,10 @@ class IDPP(Calculator):
 
     def _compute_target_distances(self) -> np.ndarray:
         """Linearly interpolate pairwise distances between initial and final images."""
-        n_atoms = self.initial_positions.shape[0]
-        d_initial = np.zeros((n_atoms, n_atoms))
-        d_final = np.zeros((n_atoms, n_atoms))
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                d_initial[i, j] = d_initial[j, i] = np.linalg.norm(
-                    self.initial_positions[j] - self.initial_positions[i]
-                )
-                d_final[i, j] = d_final[j, i] = np.linalg.norm(
-                    self.final_positions[j] - self.final_positions[i]
-                )
+        diff_i = self.initial_positions[:, None, :] - self.initial_positions[None, :, :]
+        d_initial = np.sqrt((diff_i * diff_i).sum(axis=-1))
+        diff_f = self.final_positions[:, None, :] - self.final_positions[None, :, :]
+        d_final = np.sqrt((diff_f * diff_f).sum(axis=-1))
         return (1.0 - self.alpha) * d_initial + self.alpha * d_final
 
     def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
@@ -85,37 +78,32 @@ class IDPP(Calculator):
         positions = self.atoms.get_positions()
         n_atoms = len(positions)
 
-        current_distances = np.zeros((n_atoms, n_atoms))
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                d = np.linalg.norm(positions[j] - positions[i])
-                current_distances[i, j] = current_distances[j, i] = d
+        # Vectorized pairwise distance matrix: diff[i,j] = pos[i] - pos[j]
+        diff = positions[:, None, :] - positions[None, :, :]   # (n, n, 3)
+        current_distances = np.sqrt((diff * diff).sum(axis=-1))  # (n, n)
 
-        energy = 0.0
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                d_ij = current_distances[i, j]
-                d_t = self.target_distances[i, j]
-                if d_t < 1e-10:
-                    continue
-                w = 1.0 / (d_t ** self.d_power)
-                energy += w * (d_ij - d_t) ** 2
-        self.results["energy"] = energy
+        d_t = self.target_distances  # (n, n)
+
+        # Energy over upper triangle (i < j)
+        i_idx, j_idx = np.triu_indices(n_atoms, k=1)
+        d_ij = current_distances[i_idx, j_idx]
+        d_t_vals = d_t[i_idx, j_idx]
+
+        valid = d_t_vals > 1e-10
+        safe_dt = np.where(valid, d_t_vals, 1.0)
+        w = np.where(valid, 1.0 / (safe_dt ** self.d_power), 0.0)
+
+        self.results["energy"] = float(np.sum(w * (d_ij - d_t_vals) ** 2))
 
         if "forces" in properties:
-            forces = np.zeros((n_atoms, 3))
-            for i in range(n_atoms):
-                for j in range(n_atoms):
-                    if i == j:
-                        continue
-                    d_ij = current_distances[i, j]
-                    d_t = self.target_distances[i, j]
-                    if d_t < 1e-10 or d_ij < 1e-10:
-                        continue
-                    w = 1.0 / (d_t ** self.d_power)
-                    diff = positions[i] - positions[j]
-                    forces[i] += -2.0 * w * (d_ij - d_t) / d_ij * diff
-            self.results["forces"] = forces
+            # scale[i,j] = -2 * w[i,j] * (d[i,j] - d_t[i,j]) / d[i,j]
+            # forces[i] = sum_j scale[i,j] * diff[i,j]  where diff[i,j] = pos[i] - pos[j]
+            valid_both = (d_t > 1e-10) & (current_distances > 1e-10)  # (n, n)
+            safe_d = np.where(valid_both, current_distances, 1.0)
+            safe_dt_full = np.where(valid_both, d_t, 1.0)
+            w_full = np.where(valid_both, 1.0 / (safe_dt_full ** self.d_power), 0.0)
+            scale = -2.0 * w_full * (current_distances - d_t) / safe_d  # (n, n)
+            self.results["forces"] = np.einsum("ij,ijk->ik", scale, diff)  # (n, 3)
 
 
 def create_idpp_calculators(
