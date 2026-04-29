@@ -128,7 +128,7 @@ def _run_neb(images, n_images, fmax, steps, verbose):
     images[0].calc = IDPP(initial_pos, final_pos, alpha=0.0)
     images[-1].calc = IDPP(initial_pos, final_pos, alpha=1.0)
 
-    neb = NEB(images)
+    neb = NEB(images, method='improvedtangent')
     if verbose:
         FIRE(neb).run(fmax=fmax, steps=steps)
     else:
