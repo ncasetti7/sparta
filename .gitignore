@@ -28,6 +28,9 @@ htmlcov/
 .ipynb_checkpoints/
 *.ipynb
 
+# Claude Code
+.claude/
+
 # IDEs
 .vscode/
 .idea/
