@@ -107,7 +107,7 @@ def _generate_reaction_conformers_single(
     embed_params.useRandomCoords = True
     embed_params.pruneRmsThresh = 0.01
     if seed is not None:
-        embed_params.randomSeed = seed
+        embed_params.randomSeed = seed + 1
 
     # Embed reactant conformers
     embed_params.SetBoundsMat(reactant_bm)

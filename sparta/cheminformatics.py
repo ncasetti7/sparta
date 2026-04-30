@@ -60,7 +60,7 @@ def generate_conformer(mol: Chem.Mol, smiles: str, seed: Optional[int]) -> Chem.
     to avoid initial overlaps.
     """
     if seed is not None:
-        result = AllChem.EmbedMolecule(mol, maxAttempts=100000, randomSeed=seed)
+        result = AllChem.EmbedMolecule(mol, maxAttempts=100000, randomSeed=seed + 1)
     else:
         result = AllChem.EmbedMolecule(mol, maxAttempts=100000)
     if result != 0:
@@ -76,7 +76,7 @@ def generate_conformer(mol: Chem.Mol, smiles: str, seed: Optional[int]) -> Chem.
             ps.removeHs = False
             temp_mol = Chem.MolFromSmiles(smi, ps)
             if seed is not None:
-                result = AllChem.EmbedMolecule(temp_mol, maxAttempts=100000, randomSeed=seed)
+                result = AllChem.EmbedMolecule(temp_mol, maxAttempts=100000, randomSeed=seed + 1)
             else:
                 result = AllChem.EmbedMolecule(temp_mol, maxAttempts=100000)
             if result != 0:
