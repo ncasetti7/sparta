@@ -41,6 +41,16 @@ class Reaction:
         Atom-mapped SMILES for the reactant(s).
     product_smiles : str
         Atom-mapped SMILES for the product(s).
+    charge : int, optional
+        Total molecular charge.  If omitted, inferred from formal charges in
+        the reactant SMILES (reactant and product must agree).  Passed to any
+        calculator supplied to :meth:`generate_initial_conformers` or
+        :meth:`run_iterative_alignment`, overriding whatever charge the
+        calculator was initialised with.
+    multiplicity : int, optional
+        Spin multiplicity (2S + 1).  If omitted, inferred from the number of
+        radical electrons in the reactant SMILES (``n_radical_electrons + 1``).
+        Handled the same way as ``charge``.
     n_conformers : int
         Number of conformers to generate per (seed, stretch_factor) combination.
     n_seeds : int
@@ -72,6 +82,8 @@ class Reaction:
         self,
         reactant_smiles: str,
         product_smiles: str,
+        charge: Optional[int] = None,
+        multiplicity: Optional[int] = None,
         n_conformers: int = 10,
         n_seeds: int = 1,
         stretch_factors: Union[float, List[float]] = 1.5,
@@ -101,6 +113,20 @@ class Reaction:
         # ── Molecule objects ──────────────────────────────────────────────
         self.reactant_mol: Chem.Mol = cheminformatics.make_mol(reactant_smiles)
         self.product_mol: Chem.Mol = cheminformatics.make_mol(product_smiles)
+
+        # ── Charge and multiplicity ───────────────────────────────────────
+        reac_charge = rdmolops.GetFormalCharge(self.reactant_mol)
+        prod_charge = rdmolops.GetFormalCharge(self.product_mol)
+        if reac_charge != prod_charge:
+            raise ValueError(
+                f"Reactant charge ({reac_charge}) differs from product charge "
+                f"({prod_charge}): charge is not conserved."
+            )
+        self.charge: int = reac_charge if charge is None else charge
+        self.multiplicity: int = (
+            sum(a.GetNumRadicalElectrons() for a in self.reactant_mol.GetAtoms()) + 1
+            if multiplicity is None else multiplicity
+        )
 
         # ── Reaction topology ─────────────────────────────────────────────
         self.changing_bonds: List[Tuple[int, int]] = self._compute_changing_bonds()
@@ -233,6 +259,9 @@ class Reaction:
 
         Returns ``self`` to allow method chaining.
         """
+        if calculator is not None and hasattr(calculator, "charge"):
+            calculator.charge = self.charge
+            calculator.multiplicity = self.multiplicity
         from sparta.initial_generation import generate_initial_conformers
         return generate_initial_conformers(self, n_workers=n_workers, calculator=calculator)
 
@@ -283,6 +312,9 @@ class Reaction:
             results in ``best_reac_sp_energy``, ``best_prod_sp_energy``, and
             ``best_midpoint_sp_energy``.
         """
+        if calculator is not None and hasattr(calculator, "charge"):
+            calculator.charge = self.charge
+            calculator.multiplicity = self.multiplicity
         from sparta.iterative_alignment import run_iterative_alignment
         return run_iterative_alignment(
             self,

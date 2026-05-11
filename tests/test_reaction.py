@@ -1,5 +1,7 @@
 """Tests for sparta.reaction.Reaction and the top-level pipeline."""
 
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
 
@@ -114,6 +116,91 @@ class TestReactionInit:
                 rotation=False,
                 translation=True,
             )
+
+    def test_charge_inferred_neutral(self):
+        r = Reaction(reactant_smiles=REACTANT_SMILES, product_smiles=PRODUCT_SMILES)
+        assert r.charge == 0
+
+    def test_multiplicity_inferred_singlet(self):
+        r = Reaction(reactant_smiles=REACTANT_SMILES, product_smiles=PRODUCT_SMILES)
+        assert r.multiplicity == 1
+
+    def test_charge_inferred_from_smiles(self):
+        # [F-] + [Na+] → net charge 0 on both sides
+        r = Reaction(reactant_smiles="[F-:1].[Na+:2]", product_smiles="[F-:1].[Na+:2]")
+        assert r.charge == 0
+
+    def test_charge_inferred_cationic(self):
+        # Both sides carry +1 overall
+        r = Reaction(reactant_smiles="[NH4+:1]", product_smiles="[NH4+:1]")
+        assert r.charge == 1
+
+    def test_charge_conservation_error(self):
+        # Reactant and product have different formal charges → ValueError
+        with pytest.raises(ValueError, match="charge is not conserved"):
+            Reaction(reactant_smiles="[F-:1].[Na+:2]", product_smiles="[Na+:1].[F:2]")
+
+    def test_charge_explicit_override(self):
+        r = Reaction(
+            reactant_smiles=REACTANT_SMILES,
+            product_smiles=PRODUCT_SMILES,
+            charge=2,
+        )
+        assert r.charge == 2
+
+    def test_multiplicity_explicit_override(self):
+        r = Reaction(
+            reactant_smiles=REACTANT_SMILES,
+            product_smiles=PRODUCT_SMILES,
+            multiplicity=3,
+        )
+        assert r.multiplicity == 3
+
+
+# ---------------------------------------------------------------------------
+# Calculator charge/multiplicity propagation
+# ---------------------------------------------------------------------------
+
+class TestCalculatorPropagation:
+    """Reaction.charge/multiplicity must be applied to any passed calculator."""
+
+    def _make_reaction(self, charge=0, multiplicity=1):
+        return Reaction(
+            reactant_smiles=REACTANT_SMILES,
+            product_smiles=PRODUCT_SMILES,
+            charge=charge,
+            multiplicity=multiplicity,
+            n_conformers=1,
+            n_seeds=1,
+            stretch_factors=1.5,
+            top_k=1,
+            n_images=3,
+        )
+
+    def test_generate_conformers_applies_charge_to_calculator(self):
+        r = self._make_reaction(charge=-1, multiplicity=2)
+        calc = MagicMock()
+        calc.charge = 99
+        calc.multiplicity = 99
+        with patch("sparta.initial_generation.generate_initial_conformers", return_value=r):
+            r.generate_initial_conformers(calculator=calc)
+        assert calc.charge == -1
+        assert calc.multiplicity == 2
+
+    def test_run_alignment_applies_charge_to_calculator(self):
+        r = self._make_reaction(charge=2, multiplicity=3)
+        r.top_k_conformers = [{}]
+        calc = MagicMock()
+        calc.charge = 99
+        calc.multiplicity = 99
+        with patch("sparta.iterative_alignment.run_iterative_alignment", return_value=r):
+            r.run_iterative_alignment(calculator=calc)
+        assert calc.charge == 2
+        assert calc.multiplicity == 3
+
+    def test_no_calculator_no_error(self):
+        r = self._make_reaction()
+        r.generate_initial_conformers()  # calculator=None should not raise
 
 
 # ---------------------------------------------------------------------------

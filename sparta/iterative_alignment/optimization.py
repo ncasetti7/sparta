@@ -720,6 +720,8 @@ def find_optimal_stretch_factor(
         trial = Reaction(
             reactant_smiles=reaction.reactant_smiles,
             product_smiles=reaction.product_smiles,
+            charge=reaction.charge,
+            multiplicity=reaction.multiplicity,
             n_conformers=reaction.n_conformers,
             n_seeds=reaction.n_seeds,
             stretch_factors=[round(stretch, 10)],
