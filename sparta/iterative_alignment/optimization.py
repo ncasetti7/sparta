@@ -732,6 +732,13 @@ def find_optimal_stretch_factor(
             cutoff=reaction.cutoff,
             rotation=reaction.rotation,
             translation=reaction.translation,
+            catalyst_bias=reaction.catalyst_bias,
+            catalyst_atoms=reaction.catalyst_atoms,
+            tether_mode=reaction.tether_mode,
+            tether_anchor=reaction.tether_anchor,
+            diversity_rmsd=reaction.diversity_rmsd,
+            selection=reaction.selection,
+            score_cap=reaction.score_cap,
         )
 
         try:

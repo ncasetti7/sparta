@@ -110,6 +110,37 @@ rxn.top_k_conformers    # the top-k subset passed to iterative alignment
 | `cutoff` | `float` | `10.0` | Neighbour-pair cutoff (Å) for overlap evaluation |
 | `rotation` | `bool` | `True` | Include fragment rotations |
 | `translation` | `bool` | auto | Include fragment translations (default: `True` when multiple fragments exist) |
+| `catalyst_bias` | `float` | `0.0` | Bias the catalyst toward the reaction centre (0 = off, 1 = tightest leash) |
+| `catalyst_atoms` | `list[int]` or `None` | `None` | Atom indices (map number − 1) naming the catalyst; auto-detected when `None` |
+| `tether_mode` | `str` | `"center"` | Catalyst tether geometry: `"center"` (head-on) or `"explore"` (sphere-cover poses) |
+| `tether_anchor` | `int` or `None` | `None` | Explicit catalyst atom to tether, overriding `tether_mode` |
+| `diversity_rmsd` | `float` | `0.5` | RMSD (Å) below which selected conformers count as duplicates (0 disables) |
+| `selection` | `str` | `"coverage"` | `top_k` selection: `"coverage"` (farthest-point spread) or `"score"` (lowest barrier) |
+| `score_cap` | `float` or `None` | `3.0` | Drop pairs scoring worse than this multiple of the best score before selection |
+
+### Catalyst tethering and conformer coverage
+
+For catalysed / multi-fragment reactions, SPARTA can bias where a non-reacting
+fragment (catalyst, additive) is placed during embedding, and how the final seed
+conformers are chosen — important when the conformers seed transition-state searches
+and should cover diverse pose geometries rather than only low-barrier ones.
+
+- **Catalyst leash** (`catalyst_bias` > 0): caps the distance between the catalyst
+  and the reaction centre, so the catalyst is sampled near the reactive site instead
+  of at a random, non-clashing position. Name it with `catalyst_atoms`; the reaction
+  centre is then the changing-bond atoms of the reacting molecules.
+- **Tether geometry** (`tether_mode`): `"center"` pulls the catalyst head-on;
+  `"explore"` covers the catalyst and reaction centre with ~4 Å spheres and samples
+  one pose per sphere–sphere pair, for broad approach-angle coverage.
+- **Coverage selection** (`selection="coverage"`, default): `top_k` is chosen by
+  farthest-point (max-min) spread in symmetry-aware RMSD space rather than by lowest
+  barrier, so the seeds span diverse geometries. A `score_cap` gate first drops the
+  sterically worst pairs (score > `score_cap` × best), and `diversity_rmsd` sets the
+  near-duplicate floor where coverage stops.
+
+These default to inert / sensible values, so existing unimolecular workflows are
+unaffected (`catalyst_bias=0`, `tether_mode="center"`, coverage falls back to the
+best-scoring distinct pairs).
 
 ### `run_iterative_alignment` parameters
 
@@ -140,7 +171,13 @@ reactant_smiles,product_smiles
 [c:1]1[cH:2][cH:3][cH:4][cH:5][cH:6]1.[Br:7][Br:8],[c:1]1[cH:2][cH:3][cH:4][cH:5][c:6]1[Br:7].[H:9][Br:8]
 ```
 
-Additional columns are preserved in the output.
+Additional columns are preserved in the output. Two optional columns are read
+per-reaction when present (they override the global config for that row):
+
+| Column | Description |
+|--------|-------------|
+| `catalyst_atoms` | Space/semicolon-separated atom indices naming the catalyst, e.g. `7 8 9` |
+| `tether_anchor` | A single catalyst atom index to tether (overrides `tether_mode`) |
 
 ### Basic usage
 
@@ -156,6 +193,12 @@ python workflows/process_reactions_from_file.py reactions.csv \
     --n-conformers 10 --n-seeds 3 \
     --stretch-factors 1.3 1.5 1.8 \
     --top-k 5 --objective barrier
+
+# Catalysed run: bias the catalyst to the reaction centre, explore poses,
+# and pick a coverage-diverse seed set
+python workflows/process_reactions_from_file.py reactions.csv \
+    --catalyst-bias 0.4 --tether-mode explore \
+    --selection coverage --score-cap 3
 
 # Load hyperparameters from a JSON config
 python workflows/process_reactions_from_file.py reactions.csv --config config.json
@@ -176,6 +219,11 @@ CLI flags override config file values. All keys are optional.
     "stretch_factors": [1.3, 1.5, 1.8],
     "top_k": 5,
     "n_images": 15,
+    "catalyst_bias": 0.0,
+    "tether_mode": "center",
+    "diversity_rmsd": 0.5,
+    "selection": "coverage",
+    "score_cap": 3.0,
     "neb_fmax": 0.001,
     "neb_steps": 200,
     "propagation_threshold": 0.0001,
@@ -211,6 +259,13 @@ options:
   --stretch-factors SF [...]  Stretch factor(s) [default: 1.5]
   --top-k INT                 Top-k conformers to align [default: 5]
   --n-images INT              NEB images [default: 15]
+
+  --catalyst-bias FLOAT       Bias catalyst toward the reaction centre, 0–1 [default: 0.0]
+  --tether-mode {center,explore}  Catalyst tether geometry [default: center]
+  --diversity-rmsd FLOAT      Duplicate RMSD floor Å [default: 0.5]
+  --selection {coverage,score}    top_k selection strategy [default: coverage]
+  --score-cap FLOAT           Drop pairs > this × best score before selection [default: 3.0]
+  --no-score-cap              Disable the score-cap feasibility gate
 
   --neb-fmax FLOAT            NEB force convergence [default: 0.001]
   --neb-steps INT             Max NEB steps per run [default: 200]

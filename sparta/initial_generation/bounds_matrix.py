@@ -226,6 +226,51 @@ def _select_diverse_top_k(conformers, top_k, rmsd_threshold, reactant_mol, produ
     return [conformers[i] for i in reps]
 
 
+def _select_coverage(conformers, top_k, rmsd_floor, reactant_mol, product_mol):
+    """
+    Farthest-point ("coverage") selection: pick up to ``top_k`` conformer pairs
+    that maximally span pose space under symmetry-aware heavy-atom RMSD.
+
+    ``conformers`` must be pre-sorted by ascending score.  The best-scoring pair
+    seeds the set (a feasible anchor); each subsequent pick is the pair whose
+    minimum symmetry-RMSD to the already-chosen set is largest (greedy k-center /
+    max-min), so the budget spreads across the widest range of geometries rather
+    than crowding the lowest-barrier ones.  Selection stops once that largest
+    minimum distance drops to ``rmsd_floor`` — i.e. only near-duplicates remain —
+    so the result holds only distinct poses and may be shorter than ``top_k``.
+
+    Pair distance is max(reactant_rmsd, product_rmsd), consistent with the
+    "same category" definition used by the score-based filter.
+    """
+    n = len(conformers)
+    if n == 0 or top_k <= 0:
+        return []
+    floor = rmsd_floor if rmsd_floor and rmsd_floor > 0.0 else 0.0
+
+    reac_mols = [_heavy_atom_mol(reactant_mol, c["reactant_coords"]) for c in conformers]
+    prod_mols = [_heavy_atom_mol(product_mol, c["product_coords"]) for c in conformers]
+
+    def pair_dist(i, j):
+        return max(_sym_rmsd(reac_mols[i], reac_mols[j]),
+                   _sym_rmsd(prod_mols[i], prod_mols[j]))
+
+    selected = [0]  # best-scoring pair anchors the cover (conformers are sorted)
+    mindist = np.array([pair_dist(i, 0) for i in range(n)])
+    mindist[0] = -np.inf
+    while len(selected) < min(top_k, n):
+        far = int(np.argmax(mindist))
+        if mindist[far] <= floor:  # only near-duplicates of the set remain
+            break
+        selected.append(far)
+        mindist[far] = -np.inf
+        for i in range(n):
+            if mindist[i] != -np.inf:
+                d = pair_dist(i, far)
+                if d < mindist[i]:
+                    mindist[i] = d
+    return [conformers[i] for i in selected]
+
+
 # ---------------------------------------------------------------------------
 # Public high-level entry point
 # ---------------------------------------------------------------------------
@@ -319,10 +364,25 @@ def generate_initial_conformers(
     valid.sort(key=lambda c: c["score"])
 
     reaction.all_conformers = valid
-    reaction.top_k_conformers = _select_diverse_top_k(
-        valid, reaction.top_k, reaction.diversity_rmsd,
-        reaction.reactant_mol, reaction.product_mol,
-    )
+
+    # Feasibility gate: restrict selection to pairs within score_cap × the best
+    # score, so selection never reaches into the strained, high-barrier tail.
+    # all_conformers keeps the full scored pool.
+    pool = valid
+    if valid and reaction.score_cap is not None and valid[0]["score"] > 0.0:
+        cutoff = reaction.score_cap * valid[0]["score"]
+        pool = [c for c in valid if c["score"] <= cutoff]
+
+    if reaction.selection == "coverage":
+        reaction.top_k_conformers = _select_coverage(
+            pool, reaction.top_k, reaction.diversity_rmsd,
+            reaction.reactant_mol, reaction.product_mol,
+        )
+    else:
+        reaction.top_k_conformers = _select_diverse_top_k(
+            pool, reaction.top_k, reaction.diversity_rmsd,
+            reaction.reactant_mol, reaction.product_mol,
+        )
 
     if calculator is not None:
         import ase

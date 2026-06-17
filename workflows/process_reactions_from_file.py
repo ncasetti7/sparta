@@ -34,6 +34,11 @@ Config file format (JSON)::
         "stretch_factors": [1.3, 1.5, 1.8],
         "top_k": 5,
         "n_images": 15,
+        "catalyst_bias": 0.0,
+        "tether_mode": "center",
+        "diversity_rmsd": 0.5,
+        "selection": "coverage",
+        "score_cap": 3.0,
         "neb_fmax": 0.001,
         "neb_steps": 200,
         "propagation_threshold": 0.0001,
@@ -42,6 +47,11 @@ Config file format (JSON)::
         "objective": "barrier",
         "d_power": 4
     }
+
+Optional per-reaction columns in the input CSV (override the global config per row)::
+
+    catalyst_atoms   space/semicolon-separated atom indices identifying the catalyst
+    tether_anchor    a single catalyst atom index to tether (overrides tether_mode)
 """
 
 import argparse
@@ -90,6 +100,25 @@ def _save_conformers(reaction, out_dir: str, reaction_idx: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-row parsing (optional per-reaction catalyst columns)
+# ---------------------------------------------------------------------------
+
+def _parse_int_list(raw) -> "list | None":
+    """Parse a per-row atom-index list like '7 8 9', '7;8;9', or '7,8,9'."""
+    if raw is None or not str(raw).strip():
+        return None
+    parts = str(raw).replace(";", " ").replace(",", " ").split()
+    return [int(p) for p in parts]
+
+
+def _parse_int(raw) -> "int | None":
+    """Parse a single optional per-row integer cell."""
+    if raw is None or not str(raw).strip():
+        return None
+    return int(str(raw).strip())
+
+
+# ---------------------------------------------------------------------------
 # Per-reaction worker (must be top-level for multiprocessing pickling)
 # ---------------------------------------------------------------------------
 
@@ -132,6 +161,13 @@ def _process_reaction(task: tuple) -> tuple:
             stretch_factors=cfg["stretch_factors"],
             top_k=cfg["top_k"],
             n_images=cfg["n_images"],
+            catalyst_bias=cfg["catalyst_bias"],
+            tether_mode=cfg["tether_mode"],
+            diversity_rmsd=cfg["diversity_rmsd"],
+            selection=cfg["selection"],
+            score_cap=cfg["score_cap"],
+            catalyst_atoms=_parse_int_list(row.get("catalyst_atoms")),
+            tether_anchor=_parse_int(row.get("tether_anchor")),
         )
 
         if find_optimal_stretch:
@@ -210,6 +246,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-k", type=int, default=None)
     p.add_argument("--n-images", type=int, default=None)
 
+    # Conformer selection & catalyst-pose hyperparameters
+    p.add_argument(
+        "--catalyst-bias", type=float, default=None,
+        help="Bias the catalyst toward the reaction center, 0–1 [default: 0.0 = off].",
+    )
+    p.add_argument(
+        "--tether-mode", choices=["center", "explore"], default=None,
+        help="Catalyst tether geometry: 'center' (head-on) or 'explore' (sphere-cover poses) [default: center].",
+    )
+    p.add_argument(
+        "--diversity-rmsd", type=float, default=None,
+        help="RMSD (Å) below which selected conformers count as duplicates [default: 0.5].",
+    )
+    p.add_argument(
+        "--selection", choices=["coverage", "score"], default=None,
+        help="top_k selection: 'coverage' (farthest-point spread) or 'score' (lowest barrier) [default: coverage].",
+    )
+    p.add_argument(
+        "--score-cap", type=float, default=None,
+        help="Drop pairs scoring worse than this multiple of the best score before selection [default: 3.0].",
+    )
+    p.add_argument(
+        "--no-score-cap", action="store_true",
+        help="Disable the score-cap feasibility gate entirely.",
+    )
+
     # Iterative alignment hyperparameters
     p.add_argument("--neb-fmax", type=float, default=None)
     p.add_argument("--neb-steps", type=int, default=None)
@@ -278,6 +340,11 @@ def _merge_config(args: argparse.Namespace) -> dict:
         "stretch_factors": 1.5,
         "top_k": 5,
         "n_images": 15,
+        "catalyst_bias": 0.0,
+        "tether_mode": "center",
+        "diversity_rmsd": 0.5,
+        "selection": "coverage",
+        "score_cap": 3.0,
         "neb_fmax": 0.001,
         "neb_steps": 200,
         "propagation_threshold": 0.0001,
@@ -299,6 +366,11 @@ def _merge_config(args: argparse.Namespace) -> dict:
         "stretch_factors": args.stretch_factors,
         "top_k": args.top_k,
         "n_images": args.n_images,
+        "catalyst_bias": args.catalyst_bias,
+        "tether_mode": args.tether_mode,
+        "diversity_rmsd": args.diversity_rmsd,
+        "selection": args.selection,
+        "score_cap": args.score_cap,
         "neb_fmax": args.neb_fmax,
         "neb_steps": args.neb_steps,
         "propagation_threshold": args.propagation_threshold,
@@ -310,6 +382,9 @@ def _merge_config(args: argparse.Namespace) -> dict:
     for key, val in cli_map.items():
         if val is not None:
             defaults[key] = val
+
+    if args.no_score_cap:
+        defaults["score_cap"] = None
 
     return defaults
 

@@ -111,6 +111,21 @@ class Reaction:
         distinct geometries rather than near-duplicates.  Two pairs share a
         category when both their reactant and product RMSDs fall below this
         value.  Set to 0 to disable (keep the best top_k purely by score).
+    selection : {'coverage', 'score'}
+        How ``top_k_conformers`` is chosen from the scored pool.  'coverage'
+        (default) is a farthest-point selection that maximises spread in
+        symmetry-aware RMSD space: the best-scoring pair anchors the set and each
+        further pick is the pose farthest from those already chosen, so the budget
+        spans diverse geometries for transition-state seeding rather than the
+        lowest-barrier ones.  'score' keeps the best-scoring representative of each
+        of the first ``top_k`` distinct RMSD clusters.  Both stop early once only
+        near-duplicates (within ``diversity_rmsd``) remain.
+    score_cap : float or None
+        Feasibility gate applied before ``selection``: conformer pairs whose NEB
+        score exceeds ``score_cap`` × the lowest (best) score in the pool are
+        excluded, so coverage/score selection never reaches into the strained,
+        high-barrier tail.  Must be >= 1.  Defaults to 3.0; set to None to
+        disable.  ``all_conformers`` still holds the full scored pool.
     """
 
     def __init__(
@@ -134,6 +149,8 @@ class Reaction:
         tether_mode: str = "center",
         tether_anchor: Optional[int] = None,
         diversity_rmsd: float = 0.5,
+        selection: str = "coverage",
+        score_cap: Optional[float] = 3.0,
     ) -> None:
         self.reactant_smiles = reactant_smiles
         self.product_smiles = product_smiles
@@ -150,6 +167,14 @@ class Reaction:
         self.k_nearest_dihedrals = k_nearest_dihedrals
         self.cutoff = cutoff
         self.diversity_rmsd = diversity_rmsd
+        if selection not in ("coverage", "score"):
+            raise ValueError(
+                f"selection must be 'coverage' or 'score', got {selection!r}."
+            )
+        self.selection = selection
+        if score_cap is not None and score_cap < 1.0:
+            raise ValueError(f"score_cap must be >= 1 or None, got {score_cap}.")
+        self.score_cap = score_cap
 
         # ── Molecule objects ──────────────────────────────────────────────
         self.reactant_mol: Chem.Mol = cheminformatics.make_mol(reactant_smiles)
