@@ -17,7 +17,7 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdDistGeom
 
-from sparta.cheminformatics import add_more_coords_to_mol
+from sparta.cheminformatics import add_coords_to_mol, add_more_coords_to_mol
 from sparta.initial_generation.dg_optimizer import optimize_to_bounds_matrix_and_rmsd
 from sparta.iterative_alignment.force_propagation import transform_mol
 
@@ -31,6 +31,7 @@ def _generate_reaction_conformers_single(
     reaction: "Reaction",
     stretch_factor: float,
     seed: Optional[int],
+    config_idx: int = 0,
 ) -> Tuple[Chem.Mol, Chem.Mol, np.ndarray, np.ndarray]:
     """
     Generate reactant/product conformer pairs for a single (stretch_factor, seed)
@@ -84,9 +85,11 @@ def _generate_reaction_conformers_single(
     # Bonds present in reactant but absent in product (breaking bonds in product side)
     product_diff_bonds = [b for b in changing_bonds if b not in product_bonds]
 
-    # Copy the pre-computed base bounds matrices and modify for this stretch factor
-    reactant_bm = reaction.reactant_base_bm.copy()
-    product_bm = reaction.product_base_bm.copy()
+    # Copy the (catalyst-leashed, if any) base bounds matrices for this tether
+    # configuration and modify them for this stretch factor.
+    base_reac, base_prod = reaction.base_bms_for_config(config_idx)
+    reactant_bm = base_reac.copy()
+    product_bm = base_prod.copy()
 
     for bond in reactant_diff_bonds:
         atom1, atom2 = bond
@@ -158,6 +161,72 @@ def _generate_reaction_conformers_single(
 
 
 # ---------------------------------------------------------------------------
+# Diversity filtering for top_k selection
+# ---------------------------------------------------------------------------
+
+def _heavy_atom_mol(template: Chem.Mol, coords: np.ndarray) -> Chem.Mol:
+    """
+    Build a heavy-atom-only copy of ``template`` carrying ``coords`` as its
+    conformer, for symmetry-aware RMSD.
+
+    Hydrogens are stripped so that GetBestRMS enumerates only heavy-atom
+    automorphisms — this captures the chemically meaningful symmetry (e.g. a
+    C2-symmetric catalyst flipping onto itself) while avoiding the combinatorial
+    blow-up GetBestRMS suffers when permuting equivalent hydrogens.
+    """
+    mol = add_coords_to_mol(coords, Chem.Mol(template))
+    heavy = Chem.RemoveHs(mol)
+    return heavy if heavy.GetNumAtoms() > 0 else mol
+
+
+def _sym_rmsd(prb: Chem.Mol, ref: Chem.Mol) -> float:
+    """
+    Symmetry-aware best-fit RMSD via RDKit's GetBestRMS, which minimises over all
+    heavy-atom automorphisms of the molecule.  ``prb`` is left aligned in place
+    (irrelevant here — callers read coordinates from the conformer dicts).
+    """
+    return AllChem.GetBestRMS(prb, ref)
+
+
+def _select_diverse_top_k(conformers, top_k, rmsd_threshold, reactant_mol, product_mol):
+    """
+    Keep the best-scoring conformer pair from each symmetry-aware RMSD "category".
+
+    ``conformers`` must be pre-sorted by ascending score, so the first pair
+    accepted into a category is automatically that category's best score.  RMSD
+    is computed with RDKit's ``GetBestRMS`` on the heavy-atom skeleton, which
+    minimises over all molecular automorphisms — so a symmetric catalyst related
+    to another conformer by a symmetry "flip" is recognised as the same
+    category.  A candidate is a duplicate of an accepted representative when
+    *both* its reactant and product symmetry-RMSDs fall below ``rmsd_threshold``
+    (Å); duplicates are dropped.  Scanning stops once ``top_k`` distinct
+    representatives have been collected.
+
+    If ``rmsd_threshold`` is falsy (None or <= 0) the filter is disabled and the
+    best ``top_k`` by score are returned unchanged.
+    """
+    if not rmsd_threshold or rmsd_threshold <= 0.0:
+        return conformers[:top_k]
+
+    # Pre-build heavy-atom mols once per pool entry (GetBestRMS needs the graph).
+    reac_mols = [_heavy_atom_mol(reactant_mol, c["reactant_coords"]) for c in conformers]
+    prod_mols = [_heavy_atom_mol(product_mol, c["product_coords"]) for c in conformers]
+
+    reps = []  # indices into conformers
+    for i in range(len(conformers)):
+        if any(
+            _sym_rmsd(reac_mols[i], reac_mols[j]) < rmsd_threshold
+            and _sym_rmsd(prod_mols[i], prod_mols[j]) < rmsd_threshold
+            for j in reps
+        ):
+            continue
+        reps.append(i)
+        if len(reps) >= top_k:
+            break
+    return [conformers[i] for i in reps]
+
+
+# ---------------------------------------------------------------------------
 # Public high-level entry point
 # ---------------------------------------------------------------------------
 
@@ -197,28 +266,31 @@ def generate_initial_conformers(
 
     all_conformers = []
 
-    for seed in range(reaction.n_seeds):
-        for stretch_factor in reaction.stretch_factors:
-            try:
-                reac_mol, prod_mol, reac_bm, prod_bm = _generate_reaction_conformers_single(
-                    reaction, stretch_factor=stretch_factor, seed=seed
-                )
-            except ValueError:
-                continue
+    for config_idx in range(reaction.n_tether_configs):
+        for seed in range(reaction.n_seeds):
+            for stretch_factor in reaction.stretch_factors:
+                try:
+                    reac_mol, prod_mol, reac_bm, prod_bm = _generate_reaction_conformers_single(
+                        reaction, stretch_factor=stretch_factor, seed=seed,
+                        config_idx=config_idx,
+                    )
+                except ValueError:
+                    continue
 
-            all_reac = cheminformatics.get_all_coords_all_conformers(reac_mol)
-            all_prod = cheminformatics.get_all_coords_all_conformers(prod_mol)
+                all_reac = cheminformatics.get_all_coords_all_conformers(reac_mol)
+                all_prod = cheminformatics.get_all_coords_all_conformers(prod_mol)
 
-            for (_, reac_coords), (_, prod_coords) in zip(all_reac, all_prod):
-                all_conformers.append({
-                    "reactant_coords": reac_coords,
-                    "product_coords": prod_coords,
-                    "reactant_bounds_matrix": reac_bm,
-                    "product_bounds_matrix": prod_bm,
-                    "stretch_factor": stretch_factor,
-                    "seed": seed,
-                    "score": None,
-                })
+                for (_, reac_coords), (_, prod_coords) in zip(all_reac, all_prod):
+                    all_conformers.append({
+                        "reactant_coords": reac_coords,
+                        "product_coords": prod_coords,
+                        "reactant_bounds_matrix": reac_bm,
+                        "product_bounds_matrix": prod_bm,
+                        "stretch_factor": stretch_factor,
+                        "seed": seed,
+                        "tether_config": config_idx,
+                        "score": None,
+                    })
 
     symbols = [reaction.reactant_mol.GetAtomWithIdx(i).GetSymbol()
                for i in range(reaction.reactant_mol.GetNumAtoms())]
@@ -247,7 +319,10 @@ def generate_initial_conformers(
     valid.sort(key=lambda c: c["score"])
 
     reaction.all_conformers = valid
-    reaction.top_k_conformers = valid[: reaction.top_k]
+    reaction.top_k_conformers = _select_diverse_top_k(
+        valid, reaction.top_k, reaction.diversity_rmsd,
+        reaction.reactant_mol, reaction.product_mol,
+    )
 
     if calculator is not None:
         import ase

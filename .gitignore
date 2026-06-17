@@ -45,3 +45,4 @@ Thumbs.db
 # Conformer output (workflow script)
 conformers/
 *_results.csv
+xyzs/

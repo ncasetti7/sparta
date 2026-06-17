@@ -24,7 +24,7 @@ Typical usage::
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
-from rdkit import Chem
+from rdkit import Chem, DistanceGeometry
 from rdkit.Chem import rdDistGeom, rdmolops
 
 from sparta import cheminformatics
@@ -76,6 +76,41 @@ class Reaction:
     translation : bool or None
         Whether to include fragment translations.  Defaults to True when there
         are multiple fragments, False otherwise.
+    catalyst_bias : float
+        If > 0, bias non-reactive (spectator) fragments — e.g. a catalyst or
+        additive — toward the reaction center during conformer embedding by
+        capping their distance to it with a loose upper bound in the bounds
+        matrices.  Ranges from 0 (no bias; spectator placed freely) to 1
+        (tightest leash).  The spectator still samples position and orientation
+        freely within the leash radius, so conformational diversity is largely
+        preserved.  Name the catalyst with ``catalyst_atoms`` and vary the tether
+        geometry with ``tether_mode`` / ``tether_anchor``.
+    catalyst_atoms : list of int, optional
+        Atom indices (atom-map number − 1) identifying the catalyst.  Any atom in
+        the catalyst suffices; the whole fragment(s) containing those atoms is
+        treated as the catalyst, and the reaction center becomes the changing-bond
+        atoms *not* in the catalyst (for a multi-component reaction, the shared
+        center of the reacting molecules).  When None, the catalyst is
+        auto-detected as every fragment with no changing-bond atoms.
+    tether_mode : {'center', 'explore'}
+        How the catalyst is tethered to the reaction center.  'center' tethers the
+        catalyst's centroid-nearest heavy atom to the reaction-center centroid (a
+        single head-on pose).  'explore' covers both the catalyst and the reaction
+        center with ~4 Å spheres and emits one tether configuration per
+        (catalyst-sphere, reaction-sphere) pair, sampling many approach poses for
+        broad coverage; ``n_seeds`` then adds random replicates per pose.  Ignored
+        when ``tether_anchor`` is given.
+    tether_anchor : int, optional
+        Explicit catalyst atom index to tether to the reaction center, overriding
+        ``tether_mode`` — use when you know which catalyst atom should contact the
+        substrate (e.g. an H-bond donor).
+    diversity_rmsd : float
+        RMSD threshold (Å) for diversity filtering of ``top_k_conformers``.
+        Conformer pairs are grouped into "categories" by best-fit RMSD and only
+        the best-scoring pair from each category is kept, so the top_k carry
+        distinct geometries rather than near-duplicates.  Two pairs share a
+        category when both their reactant and product RMSDs fall below this
+        value.  Set to 0 to disable (keep the best top_k purely by score).
     """
 
     def __init__(
@@ -94,6 +129,11 @@ class Reaction:
         cutoff: float = 10.0,
         rotation: Optional[bool] = None,
         translation: Optional[bool] = None,
+        catalyst_bias: float = 0.0,
+        catalyst_atoms: Optional[List[int]] = None,
+        tether_mode: str = "center",
+        tether_anchor: Optional[int] = None,
+        diversity_rmsd: float = 0.5,
     ) -> None:
         self.reactant_smiles = reactant_smiles
         self.product_smiles = product_smiles
@@ -109,6 +149,7 @@ class Reaction:
         self.filter_dihedrals = filter_dihedrals
         self.k_nearest_dihedrals = k_nearest_dihedrals
         self.cutoff = cutoff
+        self.diversity_rmsd = diversity_rmsd
 
         # ── Molecule objects ──────────────────────────────────────────────
         self.reactant_mol: Chem.Mol = cheminformatics.make_mol(reactant_smiles)
@@ -193,6 +234,28 @@ class Reaction:
             list(f) for f in rdmolops.GetMolFrags(self.product_mol)
         ]
 
+        # ── Optional catalyst leash ───────────────────────────────────────
+        # When a bias is requested, build one or more tether configurations and
+        # precompute the matching leashed base bounds matrices (one per config).
+        # Nothing below runs when catalyst_bias == 0.
+        self.catalyst_bias: float = catalyst_bias
+        self.catalyst_atoms = None
+        self.tether_mode = tether_mode
+        self.tether_anchor = None
+        self._leashed_reac_bms: List[np.ndarray] = []
+        self._leashed_prod_bms: List[np.ndarray] = []
+        if catalyst_bias > 0.0:
+            if tether_mode not in ("center", "explore"):
+                raise ValueError(
+                    f"tether_mode must be 'center' or 'explore', got {tether_mode!r}."
+                )
+            self.catalyst_atoms = (
+                list(catalyst_atoms) if catalyst_atoms is not None else None
+            )
+            self.tether_anchor = tether_anchor
+            self._build_catalyst_leash(catalyst_bias)
+        self.n_tether_configs: int = max(1, len(self._leashed_reac_bms))
+
         # ── Rotation / translation flags ──────────────────────────────────
         self.rotation: bool = True if rotation is None else rotation
         if translation is None:
@@ -235,6 +298,159 @@ class Reaction:
         reac_bonds = cheminformatics.get_bonds(self.reactant_mol)
         prod_bonds = cheminformatics.get_bonds(self.product_mol)
         return sorted(reac_bonds.symmetric_difference(prod_bonds))
+
+    # Bias → leash-radius mapping (Å): bias 1.0 → R_near, bias → 0 → R_far.
+    _LEASH_R_NEAR: float = 4.0   # tightest leash; catalyst docked near center
+    _LEASH_R_FAR: float = 12.0   # effectively unconstrained for typical systems
+    _COVER_RADIUS: float = 4.0   # 'explore' sphere radius (Å) covering each piece
+
+    @staticmethod
+    def _central_atom(atom_indices: List[int], coords: np.ndarray) -> int:
+        """Return the atom in atom_indices closest to their geometric centroid."""
+        idx = np.asarray(atom_indices)
+        pts = coords[idx]
+        dists = np.linalg.norm(pts - pts.mean(axis=0), axis=1)
+        return int(idx[int(np.argmin(dists))])
+
+    @staticmethod
+    def _sphere_cover(
+        atom_indices: List[int], coords: np.ndarray, radius: float
+    ) -> List[int]:
+        """
+        Greedy farthest-point cover: return a small set of atoms (sphere centers)
+        such that every atom in ``atom_indices`` lies within ``radius`` of one.
+
+        The first center is the centroid-nearest atom; each subsequent center is
+        the atom farthest from all current centers, until everything is covered.
+        Yields ~O(extent / radius) representatives — modest molecular coverage
+        without enumerating every atom.
+        """
+        idx = list(atom_indices)
+        if not idx:
+            return []
+        pts = coords[np.asarray(idx)]
+        centroid = pts.mean(axis=0)
+        centers = [int(np.argmin(np.linalg.norm(pts - centroid, axis=1)))]
+        while True:
+            cpts = pts[centers]
+            nearest = np.linalg.norm(pts[:, None, :] - cpts[None, :, :], axis=2).min(axis=1)
+            far = int(np.argmax(nearest))
+            if nearest[far] <= radius:
+                break
+            centers.append(far)
+        return [idx[c] for c in centers]
+
+    def _tether_configs(self) -> List[List[Tuple[int, int]]]:
+        """
+        Build the tether configurations implied by ``tether_mode`` /
+        ``tether_anchor``.  Each configuration is a list of
+        (catalyst_atom, reaction_center_atom) edges.
+
+        The catalyst is the fragment(s) named by ``catalyst_atoms`` or, when that
+        is None, every fragment with no changing-bond atom.  The reaction center
+        is the changing-bond atoms *not* in the catalyst — for a multi-component
+        reaction, the shared center of the reacting molecules.
+
+        - explicit ``tether_anchor``: one config, one edge.
+        - 'center': one config tethering each catalyst fragment's centroid heavy
+          atom to the reaction-center centroid (head-on).
+        - 'explore': cover the catalyst and the reaction center with
+          ``_COVER_RADIUS`` spheres and emit one config per
+          (catalyst-sphere, reaction-sphere) pair, sampling many poses.
+
+        Every edge spans two different fragments in both reactant and product, so
+        a molecule is never tethered to itself.
+        """
+        rxn_atoms = {a for bond in self.changing_bonds for a in bond}
+        if not rxn_atoms:
+            return []
+
+        if self.catalyst_atoms is not None:
+            cat_set = set(self.catalyst_atoms)
+            cat_frags = [f for f in self.reactant_frags if cat_set & set(f)]
+            if not cat_frags:
+                raise ValueError(
+                    f"catalyst_atoms {sorted(cat_set)} match no reactant fragment."
+                )
+            cat_all = [a for f in cat_frags for a in f]
+            center_atoms = sorted(rxn_atoms - set(cat_all))
+        else:
+            cat_frags = [f for f in self.reactant_frags if not (set(f) & rxn_atoms)]
+            cat_all = [a for f in cat_frags for a in f]
+            center_atoms = sorted(rxn_atoms)
+        if not cat_frags or not center_atoms:
+            return []
+
+        frag_reac = {a: fi for fi, frag in enumerate(self.reactant_frags) for a in frag}
+        frag_prod = {a: fi for fi, frag in enumerate(self.product_frags) for a in frag}
+
+        def heavy(atoms: List[int]) -> List[int]:
+            h = [a for a in atoms
+                 if self.reactant_mol.GetAtomWithIdx(a).GetAtomicNum() > 1]
+            return h or list(atoms)
+
+        rxn_center = self._central_atom(center_atoms, self.reac_ref_coords)
+
+        if self.tether_anchor is not None:
+            raw = [[(self.tether_anchor, rxn_center)]]
+        elif self.tether_mode == "center":
+            raw = [[(self._central_atom(heavy(f), self.reac_ref_coords), rxn_center)
+                    for f in cat_frags]]
+        else:  # 'explore'
+            cat_reps = self._sphere_cover(heavy(cat_all), self.reac_ref_coords, self._COVER_RADIUS)
+            rxn_reps = self._sphere_cover(center_atoms, self.reac_ref_coords, self._COVER_RADIUS)
+            raw = [[(c, t)] for c in cat_reps for t in rxn_reps]
+
+        # Cross-fragment guard: drop within-molecule edges and now-empty configs.
+        configs = []
+        for cfg in raw:
+            edges = [(a, b) for (a, b) in cfg
+                     if frag_reac.get(a) != frag_reac.get(b)
+                     and frag_prod.get(a) != frag_prod.get(b)]
+            if edges:
+                configs.append(edges)
+        return configs
+
+    def _build_catalyst_leash(self, bias: float) -> None:
+        """
+        Precompute one leashed, triangle-smoothed base bounds-matrix pair per
+        tether configuration, stored in ``_leashed_reac_bms`` /
+        ``_leashed_prod_bms``.
+
+        Each configuration caps the distance between its catalyst atom(s) and the
+        reaction center at the bias-derived radius.  ``base_bms_for_config`` hands
+        these out per embedding batch, and ``generate_initial_conformers`` cycles
+        through all of them, so 'explore' samples the configured poses.
+        """
+        configs = self._tether_configs()
+        if not configs:
+            return
+        radius = self._LEASH_R_FAR - bias * (self._LEASH_R_FAR - self._LEASH_R_NEAR)
+        for cfg in configs:
+            reac_bm = self.reactant_base_bm.copy()
+            prod_bm = self.product_base_bm.copy()
+            for anchor, target in cfg:
+                a, b = min(anchor, target), max(anchor, target)
+                reac_bm[a, b] = min(reac_bm[a, b], radius)
+                prod_bm[a, b] = min(prod_bm[a, b], radius)
+            if not (DistanceGeometry.DoTriangleSmoothing(reac_bm)
+                    and DistanceGeometry.DoTriangleSmoothing(prod_bm)):
+                raise ValueError(
+                    f"catalyst_bias={bias} gives leash radius {radius:.2f} Å, which is "
+                    f"geometrically infeasible; reduce catalyst_bias."
+                )
+            self._leashed_reac_bms.append(reac_bm)
+            self._leashed_prod_bms.append(prod_bm)
+
+    def base_bms_for_config(self, config_idx: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Base (reactant, product) bounds matrices for tether configuration
+        ``config_idx`` — the precomputed leashed pair when a catalyst leash is
+        active, else the plain base matrices (``catalyst_bias == 0``).
+        """
+        if not self._leashed_reac_bms:
+            return self.reactant_base_bm, self.product_base_bm
+        return self._leashed_reac_bms[config_idx], self._leashed_prod_bms[config_idx]
 
     # ── Public API ────────────────────────────────────────────────────────
 
