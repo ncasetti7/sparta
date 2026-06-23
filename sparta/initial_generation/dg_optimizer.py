@@ -144,6 +144,8 @@ def optimize_to_bounds_matrix_and_rmsd(
     weight_lower: float = 1.0,
     weight_upper: float = 1.0,
     weight_rmsd: float = 0.1,
+    chiral_constraints=None,
+    weight_chiral: float = 5.0,
     verbose: bool = False,
 ) -> np.ndarray:
     """
@@ -152,6 +154,7 @@ def optimize_to_bounds_matrix_and_rmsd(
 
     Objective:
         bounds_violations + weight_rmsd * sum_i ||r_i - ref_i||^2
+                          + weight_chiral * sum_chiral max(0, margin - s*V)^2
 
     Parameters
     ----------
@@ -161,6 +164,15 @@ def optimize_to_bounds_matrix_and_rmsd(
     weight_rmsd : float
         Should typically be smaller than weight_lower/weight_upper so bounds
         satisfaction takes priority.
+    chiral_constraints : list of (center, n0, n1, n2, target_sign, margin), optional
+        Signed chiral-volume targets, with V = (r_n0 - r_c) . ((r_n1 - r_c) x
+        (r_n2 - r_c)).  The one-sided penalty drives ``target_sign * V`` up to at
+        least ``margin``, so it enforces — and will flip a wrong-handed start into
+        — the desired handedness at each stereocenter.  Distance geometry alone is
+        chirality-blind, so this is what makes a specified configuration stick.
+    weight_chiral : float
+        Weight on the chiral-volume penalty (units differ from the distance terms,
+        so calibrate it against the volume scale ~ a few cubic ångström).
 
     Returns
     -------
@@ -188,9 +200,17 @@ def optimize_to_bounds_matrix_and_rmsd(
                 elif d > hi:
                     bounds_err += weight_upper * (d - hi) ** 2
         rmsd_err = weight_rmsd * np.sum((cur - reference_coords) ** 2)
-        total = bounds_err + rmsd_err
+        chiral_err = 0.0
+        if chiral_constraints:
+            for (c, i, j, k, s, m) in chiral_constraints:
+                vol = float((cur[i] - cur[c]) @ np.cross(cur[j] - cur[c], cur[k] - cur[c]))
+                viol = m - s * vol
+                if viol > 0.0:
+                    chiral_err += weight_chiral * viol * viol
+        total = bounds_err + rmsd_err + chiral_err
         if verbose:
-            print(f"Objective: {total:.6f} (bounds: {bounds_err:.6f}, rmsd: {rmsd_err:.6f})")
+            print(f"Objective: {total:.6f} (bounds: {bounds_err:.6f}, "
+                  f"rmsd: {rmsd_err:.6f}, chiral: {chiral_err:.6f})")
         return total
 
     def objective_grad(x):
@@ -214,6 +234,23 @@ def optimize_to_bounds_matrix_and_rmsd(
                     grad[i] += contribution
                     grad[j] -= contribution
         grad += 2.0 * weight_rmsd * (cur - reference_coords)
+        if chiral_constraints:
+            for (c, i, j, k, s, m) in chiral_constraints:
+                a = cur[i] - cur[c]
+                b = cur[j] - cur[c]
+                e = cur[k] - cur[c]
+                vol = float(a @ np.cross(b, e))
+                viol = m - s * vol
+                if viol > 0.0:
+                    # d(penalty)/dV = -2 w viol s; dV/dr via vector-triple-product
+                    g = -2.0 * weight_chiral * viol * s
+                    gi = np.cross(b, e)   # dV/dr_i
+                    gj = np.cross(e, a)   # dV/dr_j
+                    gk = np.cross(a, b)   # dV/dr_k
+                    grad[i] += g * gi
+                    grad[j] += g * gj
+                    grad[k] += g * gk
+                    grad[c] -= g * (gi + gj + gk)   # V is translation-invariant
         return grad.flatten()
 
     result = minimize(

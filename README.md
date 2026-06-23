@@ -20,7 +20,7 @@ pip install sparta
 
 > SPARTA will be available on PyPI. Until then, use the development install below.
 
-### Development install (clone from repo)
+
 
 ```bash
 git clone https://github.com/your-org/sparta.git
@@ -117,6 +117,7 @@ rxn.top_k_conformers    # the top-k subset passed to iterative alignment
 | `diversity_rmsd` | `float` | `0.5` | RMSD (Å) below which selected conformers count as duplicates (0 disables) |
 | `selection` | `str` | `"coverage"` | `top_k` selection: `"coverage"` (farthest-point spread) or `"score"` (lowest barrier) |
 | `score_cap` | `float` or `None` | `3.0` | Drop pairs scoring worse than this multiple of the best score before selection |
+| `stereo_debug` | `bool` | `False` | Print opt-in stereochemistry reference and signed-volume diagnostics |
 
 ### Catalyst tethering and conformer coverage
 
@@ -141,6 +142,17 @@ and should cover diverse pose geometries rather than only low-barrier ones.
 These default to inert / sensible values, so existing unimolecular workflows are
 unaffected (`catalyst_bias=0`, `tether_mode="center"`, coverage falls back to the
 best-scoring distinct pairs).
+
+### Stereochemistry
+
+SPARTA stores separate reactant and product stereochemical references and uses
+coordinate-level signed-volume checks to keep tetrahedral centers from flipping
+during product conformer generation and iterative alignment. Atom maps are used
+for coordinate bookkeeping, but stereochemical priority is assigned on
+map-stripped molecule copies so reaction map numbers do not affect CIP labels.
+
+For implementation details, debugging guidance, and extension notes for E/Z or
+atropisomeric stereochemistry, see [`docs/STEREOCHEMISTRY.md`](docs/STEREOCHEMISTRY.md).
 
 ### `run_iterative_alignment` parameters
 

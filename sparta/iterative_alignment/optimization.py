@@ -26,6 +26,7 @@ from sparta.iterative_alignment.force_propagation import (
     compute_endpoint_gradient_total,
 )
 from sparta.iterative_alignment.idpp import IDPP, create_idpp_calculators
+from sparta.stereochemistry import log_stereo_state, stereocenter_flipped
 
 if TYPE_CHECKING:
     from sparta.calculation.base import Calculation
@@ -314,6 +315,14 @@ def _run_alignment_single(
     symbols = [reaction.reactant_mol.GetAtomWithIdx(i).GetSymbol()
                for i in range(reaction.reactant_mol.GetNumAtoms())]
 
+    # Chirality guard targets: signed-volume signs from independently embedded
+    # reactant/product SMILES references. Endpoint adjustment is chirality-blind,
+    # so any step that inverts one of these is rejected below.
+    reac_chiral = reaction.reactant_stereo_refs
+    prod_chiral = reaction.product_stereo_refs
+    log_stereo_state(reaction, "alignment start reactant endpoint", reactant_coords, reac_chiral)
+    log_stereo_state(reaction, "alignment start product endpoint", product_coords, prod_chiral)
+
     # Extract symmetric bounds matrices and relax to current structures
     bl_init, bu_init = _extract_symmetric_bounds(reactant_bounds_matrix)
     bl_final, bu_final = _extract_symmetric_bounds(product_bounds_matrix)
@@ -426,6 +435,30 @@ def _run_alignment_single(
                 prod_atoms, final_force, bl_final, bu_final,
                 step_size=current_step, max_displacement=current_step,
             )
+
+            # Chirality guard: reject any step that inverts a stereocenter, since
+            # the IDPP force and the distance-bounds projection are both
+            # chirality-blind and would otherwise lock in a flip.
+            if (stereocenter_flipped(reac_atoms.get_positions(), reac_chiral)
+                    or stereocenter_flipped(prod_atoms.get_positions(), prod_chiral)):
+                log_stereo_state(
+                    reaction,
+                    f"alignment rejected reactant step={current_step:.4f}",
+                    reac_atoms.get_positions(),
+                    reac_chiral,
+                )
+                log_stereo_state(
+                    reaction,
+                    f"alignment rejected product step={current_step:.4f}",
+                    prod_atoms.get_positions(),
+                    prod_chiral,
+                )
+                if verbose:
+                    print(f"  Rejected step {current_step:.4f}: stereocenter flip")
+                reac_atoms.set_positions(reac_pos_before)
+                prod_atoms.set_positions(prod_pos_before)
+                current_step *= 0.5
+                continue
 
             # Cheap evaluation: warm-started interior + loose convergence
             test_images = _build_neb_images_warm(
@@ -739,6 +772,7 @@ def find_optimal_stretch_factor(
             diversity_rmsd=reaction.diversity_rmsd,
             selection=reaction.selection,
             score_cap=reaction.score_cap,
+            stereo_debug=reaction.stereo_debug,
         )
 
         try:

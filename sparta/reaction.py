@@ -28,6 +28,7 @@ from rdkit import Chem, DistanceGeometry
 from rdkit.Chem import rdDistGeom, rdmolops
 
 from sparta import cheminformatics
+from sparta.stereochemistry import log_stereo_state, tetrahedral_stereo_references
 
 
 class Reaction:
@@ -126,6 +127,10 @@ class Reaction:
         excluded, so coverage/score selection never reaches into the strained,
         high-barrier tail.  Must be >= 1.  Defaults to 3.0; set to None to
         disable.  ``all_conformers`` still holds the full scored pool.
+    stereo_debug : bool
+        If True, print opt-in stereochemistry diagnostics during reference
+        creation, initial product generation, and iterative alignment. Can also
+        be enabled with the ``SPARTA_STEREO_DEBUG=1`` environment variable.
     """
 
     def __init__(
@@ -151,9 +156,11 @@ class Reaction:
         diversity_rmsd: float = 0.5,
         selection: str = "coverage",
         score_cap: Optional[float] = 3.0,
+        stereo_debug: bool = False,
     ) -> None:
         self.reactant_smiles = reactant_smiles
         self.product_smiles = product_smiles
+        self.stereo_debug = stereo_debug
         self.n_conformers = n_conformers
         self.n_seeds = n_seeds
         self.stretch_factors = (
@@ -210,6 +217,10 @@ class Reaction:
 
         self.reac_ref_coords: np.ndarray = reac_ref_coords
         self.prod_ref_coords: np.ndarray = prod_ref_coords
+        self.reactant_stereo_refs = tetrahedral_stereo_references(reac_ref, reac_ref_coords)
+        self.product_stereo_refs = tetrahedral_stereo_references(prod_ref, prod_ref_coords)
+        log_stereo_state(self, "reactant reference", reac_ref_coords, self.reactant_stereo_refs)
+        log_stereo_state(self, "product reference", prod_ref_coords, self.product_stereo_refs)
 
         self.reac_bond_lengths: Dict[Tuple[int, int], float] = {}
         self.prod_bond_lengths: Dict[Tuple[int, int], float] = {}
@@ -355,14 +366,18 @@ class Reaction:
             return []
         pts = coords[np.asarray(idx)]
         centroid = pts.mean(axis=0)
-        centers = [int(np.argmin(np.linalg.norm(pts - centroid, axis=1)))]
+        first = int(np.argmin(np.linalg.norm(pts - centroid, axis=1)))
+        centers = [first]
+        # nearest[i] = distance from atom i to its closest chosen center, updated
+        # incrementally (O(N) per added center) rather than rebuilding the full
+        # (N, C) distance matrix each iteration.
+        nearest = np.linalg.norm(pts - pts[first], axis=1)
         while True:
-            cpts = pts[centers]
-            nearest = np.linalg.norm(pts[:, None, :] - cpts[None, :, :], axis=2).min(axis=1)
             far = int(np.argmax(nearest))
             if nearest[far] <= radius:
                 break
             centers.append(far)
+            nearest = np.minimum(nearest, np.linalg.norm(pts - pts[far], axis=1))
         return [idx[c] for c in centers]
 
     def _tether_configs(self) -> List[List[Tuple[int, int]]]:

@@ -30,6 +30,8 @@ htmlcov/
 
 # Claude Code
 .claude/
+.agents/
+AGENTS.md
 
 # IDEs
 .vscode/

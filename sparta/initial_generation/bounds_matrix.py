@@ -20,12 +20,28 @@ from rdkit.Chem import AllChem, rdDistGeom
 from sparta.cheminformatics import add_coords_to_mol, add_more_coords_to_mol
 from sparta.initial_generation.dg_optimizer import optimize_to_bounds_matrix_and_rmsd
 from sparta.iterative_alignment.force_propagation import transform_mol
+from sparta.stereochemistry import (
+    chiral_constraints_from_references,
+    correct_tetrahedral_stereochemistry,
+    log_stereo_state,
+    stereo_matches,
+)
 
 if TYPE_CHECKING:
     import ase
     from sparta.reaction import Reaction
     from sparta.calculation.base import Calculation
 
+
+class ConformerEmbeddingError(ValueError):
+    """
+    Raised by :func:`_generate_reaction_conformers_single` when RDKit cannot embed
+    a reactant/product under the given constraints.  Catching this specific type
+    (rather than bare ``ValueError``) lets the generation loop skip just that
+    failed (seed, stretch, config) without silently swallowing unrelated
+    ``ValueError``s from RDKit, NumPy, or a latent bug.  Subclasses ``ValueError``
+    for backward compatibility.
+    """
 
 def _generate_reaction_conformers_single(
     reaction: "Reaction",
@@ -109,6 +125,10 @@ def _generate_reaction_conformers_single(
     embed_params.maxIterations = 1000
     embed_params.useRandomCoords = True
     embed_params.pruneRmsThresh = 0.01
+    # Enforce each molecule's own stereochemistry during embedding (RDKit default,
+    # set explicitly so the reactant conformers and product reference geometry
+    # honour their SMILES configuration).
+    embed_params.enforceChirality = True
     if seed is not None:
         embed_params.randomSeed = seed + 1
 
@@ -117,7 +137,7 @@ def _generate_reaction_conformers_single(
     reactant_mol.RemoveAllConformers()
     AllChem.EmbedMultipleConfs(reactant_mol, n_conformers, embed_params)
     if reactant_mol.GetNumConformers() == 0:
-        raise ValueError("Could not embed reactant molecule with the given constraints.")
+        raise ConformerEmbeddingError("Could not embed reactant molecule with the given constraints.")
 
     reac_conf_ids = [conf.GetId() for conf in reactant_mol.GetConformers()]
 
@@ -128,13 +148,49 @@ def _generate_reaction_conformers_single(
     embed_params.trackFailures = True
     result = AllChem.EmbedMolecule(temp_prod, embed_params)
     if result != 0:
-        raise ValueError("Could not embed product molecule with the given constraints.")
+        raise ConformerEmbeddingError("Could not embed product molecule with the given constraints.")
+
+    # Signed-volume targets from the independently embedded product SMILES
+    # reference. The pushforward/relaxation path must match these before a
+    # conformer can feed downstream TS seeding.
+    product_stereo_refs = reaction.product_stereo_refs
+    product_chiral = chiral_constraints_from_references(product_stereo_refs)
+    log_stereo_state(
+        reaction,
+        f"embedded product reference seed={seed} stretch={stretch_factor}",
+        temp_prod.GetConformer().GetPositions(),
+        product_stereo_refs,
+    )
 
     # For each reactant conformer, derive a paired product conformer
     used_reac_conf_ids = []
     for reac_conf_id in reac_conf_ids:
         reactant_coords = reactant_mol.GetConformer(reac_conf_id).GetPositions()
+        log_stereo_state(
+            reaction,
+            f"reactant conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+            reactant_coords,
+            reaction.reactant_stereo_refs,
+        )
         transformed_coords = transform_mol(reactant_coords, temp_prod, changing_bonds)
+        log_stereo_state(
+            reaction,
+            f"product pushforward conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+            transformed_coords,
+            product_stereo_refs,
+        )
+        if not stereo_matches(transformed_coords, product_stereo_refs):
+            transformed_coords = correct_tetrahedral_stereochemistry(
+                transformed_coords,
+                product_mol,
+                product_stereo_refs,
+            )
+            log_stereo_state(
+                reaction,
+                f"product pushforward corrected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                transformed_coords,
+                product_stereo_refs,
+            )
         final_product_coords = optimize_to_bounds_matrix_and_rmsd(
             transformed_coords,
             product_bm,
@@ -142,15 +198,58 @@ def _generate_reaction_conformers_single(
             method="L-BFGS-B",
             max_iter=500,
             weight_rmsd=0.05,
+            chiral_constraints=product_chiral,
             verbose=False,
         )
+        log_stereo_state(
+            reaction,
+            f"product first relax conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+            final_product_coords,
+            product_stereo_refs,
+        )
+        if not stereo_matches(final_product_coords, product_stereo_refs):
+            corrected_coords = correct_tetrahedral_stereochemistry(
+                final_product_coords,
+                product_mol,
+                product_stereo_refs,
+            )
+            log_stereo_state(
+                reaction,
+                f"product corrected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                corrected_coords,
+                product_stereo_refs,
+            )
+            final_product_coords = optimize_to_bounds_matrix_and_rmsd(
+                corrected_coords,
+                product_bm,
+                reactant_coords,
+                method="L-BFGS-B",
+                max_iter=500,
+                weight_rmsd=0.05,
+                chiral_constraints=product_chiral,
+                verbose=False,
+            )
+            log_stereo_state(
+                reaction,
+                f"product corrected relax conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                final_product_coords,
+                product_stereo_refs,
+            )
+        if not stereo_matches(final_product_coords, product_stereo_refs):
+            log_stereo_state(
+                reaction,
+                f"product rejected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                final_product_coords,
+                product_stereo_refs,
+            )
+            continue
         product_mol = add_more_coords_to_mol(final_product_coords, product_mol)
         used_reac_conf_ids.append(reac_conf_id)
         if len(product_mol.GetConformers()) >= n_conformers:
             break
 
     if len(product_mol.GetConformers()) == 0:
-        raise ValueError("Could not generate any valid product conformers.")
+        raise ConformerEmbeddingError("Could not generate any valid product conformers.")
 
     # Remove reactant conformers that did not produce a paired product conformer
     for conf_id in reac_conf_ids:
@@ -319,7 +418,7 @@ def generate_initial_conformers(
                         reaction, stretch_factor=stretch_factor, seed=seed,
                         config_idx=config_idx,
                     )
-                except ValueError:
+                except ConformerEmbeddingError:
                     continue
 
                 all_reac = cheminformatics.get_all_coords_all_conformers(reac_mol)
@@ -367,6 +466,9 @@ def generate_initial_conformers(
 
     # Feasibility gate: restrict selection to pairs within score_cap × the best
     # score, so selection never reaches into the strained, high-barrier tail.
+    # IDPP scores are >= 0 (a sum of weighted squared distance deviations), so the
+    # multiplicative cap is well-defined; the > 0 guard only skips the gate in the
+    # degenerate case where the best score is exactly 0 (e.g. reactant == product).
     # all_conformers keeps the full scored pool.
     pool = valid
     if valid and reaction.score_cap is not None and valid[0]["score"] > 0.0:
