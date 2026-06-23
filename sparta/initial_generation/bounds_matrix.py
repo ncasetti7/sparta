@@ -370,6 +370,38 @@ def _select_coverage(conformers, top_k, rmsd_floor, reactant_mol, product_mol):
     return [conformers[i] for i in selected]
 
 
+def _generation_worker(args):
+    """Generate conformer records for one tether/seed/stretch batch."""
+    reaction, config_idx, seed, stretch_factor = args
+    from sparta import cheminformatics
+
+    try:
+        reac_mol, prod_mol, reac_bm, prod_bm = _generate_reaction_conformers_single(
+            reaction,
+            stretch_factor=stretch_factor,
+            seed=seed,
+            config_idx=config_idx,
+        )
+    except ConformerEmbeddingError:
+        return []
+
+    records = []
+    all_reac = cheminformatics.get_all_coords_all_conformers(reac_mol)
+    all_prod = cheminformatics.get_all_coords_all_conformers(prod_mol)
+    for (_, reac_coords), (_, prod_coords) in zip(all_reac, all_prod):
+        records.append({
+            "reactant_coords": reac_coords,
+            "product_coords": prod_coords,
+            "reactant_bounds_matrix": reac_bm,
+            "product_bounds_matrix": prod_bm,
+            "stretch_factor": stretch_factor,
+            "seed": seed,
+            "tether_config": config_idx,
+            "score": None,
+        })
+    return records
+
+
 # ---------------------------------------------------------------------------
 # Public high-level entry point
 # ---------------------------------------------------------------------------
@@ -392,8 +424,9 @@ def generate_initial_conformers(
     reaction : Reaction
         A fully initialised :class:`~sparta.reaction.Reaction` object.
     n_workers : int
-        Number of parallel worker processes for conformer scoring.  Set > 1
-        to use ``concurrent.futures.ProcessPoolExecutor``.
+        Number of parallel worker processes for conformer generation batches and
+        conformer scoring.  Set > 1 to use
+        ``concurrent.futures.ProcessPoolExecutor``.
     calculator : Calculation, optional
         If provided, optimise the seed-0 UFF reference conformers stored in
         ``reaction.reac_ref_coords`` and ``reaction.prod_ref_coords`` and store
@@ -405,36 +438,28 @@ def generate_initial_conformers(
     Reaction
         The same object with ``all_conformers`` and ``top_k_conformers`` populated.
     """
-    from sparta import cheminformatics
     from sparta.iterative_alignment.optimization import _score_worker
 
     all_conformers = []
+    generation_tasks = [
+        (reaction, config_idx, seed, stretch_factor)
+        for config_idx in range(reaction.n_tether_configs)
+        for seed in range(reaction.n_seeds)
+        for stretch_factor in reaction.stretch_factors
+    ]
 
-    for config_idx in range(reaction.n_tether_configs):
-        for seed in range(reaction.n_seeds):
-            for stretch_factor in reaction.stretch_factors:
-                try:
-                    reac_mol, prod_mol, reac_bm, prod_bm = _generate_reaction_conformers_single(
-                        reaction, stretch_factor=stretch_factor, seed=seed,
-                        config_idx=config_idx,
-                    )
-                except ConformerEmbeddingError:
-                    continue
-
-                all_reac = cheminformatics.get_all_coords_all_conformers(reac_mol)
-                all_prod = cheminformatics.get_all_coords_all_conformers(prod_mol)
-
-                for (_, reac_coords), (_, prod_coords) in zip(all_reac, all_prod):
-                    all_conformers.append({
-                        "reactant_coords": reac_coords,
-                        "product_coords": prod_coords,
-                        "reactant_bounds_matrix": reac_bm,
-                        "product_bounds_matrix": prod_bm,
-                        "stretch_factor": stretch_factor,
-                        "seed": seed,
-                        "tether_config": config_idx,
-                        "score": None,
-                    })
+    if n_workers > 1 and len(generation_tasks) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                batches = list(executor.map(_generation_worker, generation_tasks))
+        except (OSError, NotImplementedError):
+            batches = [_generation_worker(task) for task in generation_tasks]
+        for batch in batches:
+            all_conformers.extend(batch)
+    else:
+        for task in generation_tasks:
+            all_conformers.extend(_generation_worker(task))
 
     symbols = [reaction.reactant_mol.GetAtomWithIdx(i).GetSymbol()
                for i in range(reaction.reactant_mol.GetNumAtoms())]
@@ -445,8 +470,16 @@ def generate_initial_conformers(
             (symbols, reaction.n_images, c["reactant_coords"], c["product_coords"])
             for c in all_conformers
         ]
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            scores = list(executor.map(_score_worker, args_list))
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                scores = list(executor.map(_score_worker, args_list))
+        except (OSError, NotImplementedError):
+            scores = []
+            for args in args_list:
+                try:
+                    scores.append(_score_worker(args))
+                except Exception:
+                    scores.append(float("inf"))
         for conformer, score in zip(all_conformers, scores):
             conformer["score"] = score
     else:

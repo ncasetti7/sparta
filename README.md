@@ -118,6 +118,7 @@ rxn.top_k_conformers    # the top-k subset passed to iterative alignment
 | `selection` | `str` | `"coverage"` | `top_k` selection: `"coverage"` (farthest-point spread) or `"score"` (lowest barrier) |
 | `score_cap` | `float` or `None` | `3.0` | Drop pairs scoring worse than this multiple of the best score before selection |
 | `stereo_debug` | `bool` | `False` | Print opt-in stereochemistry reference and signed-volume diagnostics |
+| `n_workers` | `int` | `1` | Default worker processes for method calls when `n_workers` is not passed explicitly |
 
 ### Catalyst tethering and conformer coverage
 

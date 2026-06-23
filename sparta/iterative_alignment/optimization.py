@@ -773,6 +773,7 @@ def find_optimal_stretch_factor(
             selection=reaction.selection,
             score_cap=reaction.score_cap,
             stereo_debug=reaction.stereo_debug,
+            n_workers=reaction.n_workers,
         )
 
         try:

@@ -171,6 +171,7 @@ def _process_reaction(task: tuple) -> tuple:
             score_cap=cfg["score_cap"],
             catalyst_atoms=_parse_int_list(row.get("catalyst_atoms")),
             tether_anchor=_parse_int_or_list(row.get("tether_anchor")),
+            n_workers=n_workers,
         )
 
         if find_optimal_stretch:

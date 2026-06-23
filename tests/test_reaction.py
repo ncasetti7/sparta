@@ -111,6 +111,14 @@ class TestReactionInit:
         )
         assert r.stretch_factors == [1.5]
 
+    def test_n_workers_stored_on_reaction(self):
+        r = Reaction(
+            reactant_smiles=REACTANT_SMILES,
+            product_smiles=PRODUCT_SMILES,
+            n_workers=3,
+        )
+        assert r.n_workers == 3
+
     def test_translation_true_requires_rotation(self):
         with pytest.raises(ValueError):
             Reaction(
@@ -217,6 +225,20 @@ class TestCalculatorPropagation:
         assert calc.charge == -1
         assert calc.multiplicity == 2
 
+    def test_generate_conformers_uses_reaction_worker_default(self):
+        r = self._make_reaction()
+        r.n_workers = 3
+        with patch("sparta.initial_generation.generate_initial_conformers", return_value=r) as gen:
+            r.generate_initial_conformers()
+        assert gen.call_args.kwargs["n_workers"] == 3
+
+    def test_generate_conformers_worker_arg_overrides_default(self):
+        r = self._make_reaction()
+        r.n_workers = 3
+        with patch("sparta.initial_generation.generate_initial_conformers", return_value=r) as gen:
+            r.generate_initial_conformers(n_workers=2)
+        assert gen.call_args.kwargs["n_workers"] == 2
+
     def test_run_alignment_applies_charge_to_calculator(self):
         r = self._make_reaction(charge=2, multiplicity=3)
         r.top_k_conformers = [{}]
@@ -227,6 +249,14 @@ class TestCalculatorPropagation:
             r.run_iterative_alignment(calculator=calc)
         assert calc.charge == 2
         assert calc.multiplicity == 3
+
+    def test_run_alignment_uses_reaction_worker_default(self):
+        r = self._make_reaction()
+        r.n_workers = 3
+        r.top_k_conformers = [{}]
+        with patch("sparta.iterative_alignment.run_iterative_alignment", return_value=r) as align:
+            r.run_iterative_alignment()
+        assert align.call_args.kwargs["n_workers"] == 3
 
     def test_no_calculator_no_error(self):
         r = self._make_reaction()

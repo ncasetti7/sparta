@@ -157,3 +157,19 @@ class TestGenerateInitialConformers:
         n = rxn_with_conformers.reactant_mol.GetNumAtoms()
         assert c["reactant_bounds_matrix"].shape == (n, n)
         assert c["product_bounds_matrix"].shape == (n, n)
+
+    def test_parallel_generation_populates_conformers(self):
+        r = Reaction(
+            reactant_smiles=REACTANT_SMILES,
+            product_smiles=PRODUCT_SMILES,
+            n_conformers=1,
+            n_seeds=2,
+            stretch_factors=1.5,
+            top_k=2,
+            n_images=3,
+        )
+
+        generate_initial_conformers(r, n_workers=2)
+
+        assert len(r.all_conformers) > 0
+        assert len(r.top_k_conformers) > 0

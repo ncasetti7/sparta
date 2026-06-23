@@ -132,6 +132,9 @@ class Reaction:
         If True, print opt-in stereochemistry diagnostics during reference
         creation, initial product generation, and iterative alignment. Can also
         be enabled with the ``SPARTA_STEREO_DEBUG=1`` environment variable.
+    n_workers : int
+        Default number of worker processes used by method calls when
+        ``n_workers`` is not passed explicitly.
     """
 
     def __init__(
@@ -158,10 +161,12 @@ class Reaction:
         selection: str = "coverage",
         score_cap: Optional[float] = 3.0,
         stereo_debug: bool = False,
+        n_workers: int = 1,
     ) -> None:
         self.reactant_smiles = reactant_smiles
         self.product_smiles = product_smiles
         self.stereo_debug = stereo_debug
+        self.n_workers = n_workers
         self.n_conformers = n_conformers
         self.n_seeds = n_seeds
         self.stretch_factors = (
@@ -507,7 +512,7 @@ class Reaction:
 
     def generate_initial_conformers(
         self,
-        n_workers: int = 1,
+        n_workers: Optional[int] = None,
         calculator=None,
     ) -> "Reaction":
         """
@@ -518,7 +523,8 @@ class Reaction:
         Parameters
         ----------
         n_workers : int
-            Parallel worker processes for conformer scoring.
+            Parallel worker processes for conformer generation batches and
+            conformer scoring. Defaults to ``self.n_workers``.
         calculator : Calculation, optional
             If provided, optimise the seed-0 UFF reference conformers and store
             the optimised geometries and energies in ``reac_ref_optimized``,
@@ -530,7 +536,8 @@ class Reaction:
             calculator.charge = self.charge
             calculator.multiplicity = self.multiplicity
         from sparta.initial_generation import generate_initial_conformers
-        return generate_initial_conformers(self, n_workers=n_workers, calculator=calculator)
+        workers = self.n_workers if n_workers is None else n_workers
+        return generate_initial_conformers(self, n_workers=workers, calculator=calculator)
 
     def run_iterative_alignment(
         self,
@@ -542,7 +549,7 @@ class Reaction:
         objective: str = "barrier",
         d_power: int = 4,
         verbose: bool = False,
-        n_workers: int = 1,
+        n_workers: Optional[int] = None,
         calculator=None,
     ) -> "Reaction":
         """
@@ -572,7 +579,8 @@ class Reaction:
         verbose : bool
             Print progress for each conformer.
         n_workers : int
-            Parallel worker processes for per-conformer alignment.
+            Parallel worker processes for per-conformer alignment. Defaults to
+            ``self.n_workers``.
         calculator : Calculation, optional
             If provided, run single-point energy calculations on the endpoints
             and highest-IDPP-energy image of the best aligned result, storing
@@ -583,6 +591,7 @@ class Reaction:
             calculator.charge = self.charge
             calculator.multiplicity = self.multiplicity
         from sparta.iterative_alignment import run_iterative_alignment
+        workers = self.n_workers if n_workers is None else n_workers
         return run_iterative_alignment(
             self,
             neb_fmax=neb_fmax,
@@ -593,7 +602,7 @@ class Reaction:
             objective=objective,
             d_power=d_power,
             verbose=verbose,
-            n_workers=n_workers,
+            n_workers=workers,
             calculator=calculator,
         )
 
@@ -602,7 +611,7 @@ class Reaction:
         start: float = 1.0,
         step: float = 0.1,
         max_stretch: float = 3.0,
-        n_workers: int = 1,
+        n_workers: Optional[int] = None,
         neb_fmax: float = 0.001,
         neb_steps: int = 200,
         propagation_threshold: float = 0.0001,
@@ -628,18 +637,19 @@ class Reaction:
         max_stretch : float
             Upper bound on stretch factor (default 3.0).
         n_workers : int
-            Parallel worker processes.
+            Parallel worker processes. Defaults to ``self.n_workers``.
         neb_fmax, neb_steps, propagation_threshold, propagation_step_size,
         max_iterations, objective, d_power, verbose :
             Alignment hyperparameters.
         """
         from sparta.iterative_alignment import find_optimal_stretch_factor
+        workers = self.n_workers if n_workers is None else n_workers
         return find_optimal_stretch_factor(
             self,
             start=start,
             step=step,
             max_stretch=max_stretch,
-            n_workers=n_workers,
+            n_workers=workers,
             neb_fmax=neb_fmax,
             neb_steps=neb_steps,
             propagation_threshold=propagation_threshold,
