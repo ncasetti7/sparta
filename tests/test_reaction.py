@@ -18,6 +18,9 @@ FAST_PIPELINE_KWARGS = dict(
     max_iterations=2,
 )
 
+CAT_REACTANT_SMILES = "[F:1][F:2].[Cl:3][Cl:4].[O:5]([H:6])[H:7]"
+CAT_PRODUCT_SMILES = "[F:1][Cl:3].[F:2][Cl:4].[O:5]([H:6])[H:7]"
+
 
 @pytest.fixture(scope="module")
 def rxn():
@@ -155,6 +158,33 @@ class TestReactionInit:
             multiplicity=3,
         )
         assert r.multiplicity == 3
+
+    def test_single_tether_anchor_builds_one_config(self):
+        r = Reaction(
+            reactant_smiles=CAT_REACTANT_SMILES,
+            product_smiles=CAT_PRODUCT_SMILES,
+            catalyst_bias=0.5,
+            catalyst_atoms=[4],
+            tether_anchor=4,
+        )
+
+        assert r.tether_anchor == 4
+        assert r.n_tether_configs == 1
+        assert len(r._tether_configs()) == 1
+        assert r._tether_configs()[0][0][0] == 4
+
+    def test_tether_anchor_list_builds_one_config_per_anchor(self):
+        r = Reaction(
+            reactant_smiles=CAT_REACTANT_SMILES,
+            product_smiles=CAT_PRODUCT_SMILES,
+            catalyst_bias=0.5,
+            catalyst_atoms=[4],
+            tether_anchor=[4, 5],
+        )
+
+        assert r.tether_anchor == [4, 5]
+        assert r.n_tether_configs == 2
+        assert [cfg[0][0] for cfg in r._tether_configs()] == [4, 5]
 
 
 # ---------------------------------------------------------------------------

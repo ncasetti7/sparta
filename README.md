@@ -113,7 +113,7 @@ rxn.top_k_conformers    # the top-k subset passed to iterative alignment
 | `catalyst_bias` | `float` | `0.0` | Bias the catalyst toward the reaction centre (0 = off, 1 = tightest leash) |
 | `catalyst_atoms` | `list[int]` or `None` | `None` | Atom indices (map number − 1) naming the catalyst; auto-detected when `None` |
 | `tether_mode` | `str` | `"center"` | Catalyst tether geometry: `"center"` (head-on) or `"explore"` (sphere-cover poses) |
-| `tether_anchor` | `int` or `None` | `None` | Explicit catalyst atom to tether, overriding `tether_mode` |
+| `tether_anchor` | `int`, `list[int]`, or `None` | `None` | Explicit catalyst atom(s) to tether, overriding `tether_mode` |
 | `diversity_rmsd` | `float` | `0.5` | RMSD (Å) below which selected conformers count as duplicates (0 disables) |
 | `selection` | `str` | `"coverage"` | `top_k` selection: `"coverage"` (farthest-point spread) or `"score"` (lowest barrier) |
 | `score_cap` | `float` or `None` | `3.0` | Drop pairs scoring worse than this multiple of the best score before selection |
@@ -132,7 +132,9 @@ and should cover diverse pose geometries rather than only low-barrier ones.
   centre is then the changing-bond atoms of the reacting molecules.
 - **Tether geometry** (`tether_mode`): `"center"` pulls the catalyst head-on;
   `"explore"` covers the catalyst and reaction centre with ~4 Å spheres and samples
-  one pose per sphere–sphere pair, for broad approach-angle coverage.
+  one pose per sphere–sphere pair, for broad approach-angle coverage. Set
+  `tether_anchor` to one atom index, or a list of atom indices, to sample explicit
+  catalyst contact atoms instead.
 - **Coverage selection** (`selection="coverage"`, default): `top_k` is chosen by
   farthest-point (max-min) spread in symmetry-aware RMSD space rather than by lowest
   barrier, so the seeds span diverse geometries. A `score_cap` gate first drops the
@@ -189,7 +191,7 @@ per-reaction when present (they override the global config for that row):
 | Column | Description |
 |--------|-------------|
 | `catalyst_atoms` | Space/semicolon-separated atom indices naming the catalyst, e.g. `7 8 9` |
-| `tether_anchor` | A single catalyst atom index to tether (overrides `tether_mode`) |
+| `tether_anchor` | One or more catalyst atom indices to tether, e.g. `7` or `7 9 11` (overrides `tether_mode`) |
 
 ### Basic usage
 

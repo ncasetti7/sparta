@@ -51,7 +51,7 @@ Config file format (JSON)::
 Optional per-reaction columns in the input CSV (override the global config per row)::
 
     catalyst_atoms   space/semicolon-separated atom indices identifying the catalyst
-    tether_anchor    a single catalyst atom index to tether (overrides tether_mode)
+    tether_anchor    one or more catalyst atom indices to tether (overrides tether_mode)
 """
 
 import argparse
@@ -111,11 +111,14 @@ def _parse_int_list(raw) -> "list | None":
     return [int(p) for p in parts]
 
 
-def _parse_int(raw) -> "int | None":
-    """Parse a single optional per-row integer cell."""
+def _parse_int_or_list(raw) -> "int | list | None":
+    """Parse one optional integer, or an atom-index list, from a per-row cell."""
     if raw is None or not str(raw).strip():
         return None
-    return int(str(raw).strip())
+    values = _parse_int_list(raw)
+    if values is None:
+        return None
+    return values[0] if len(values) == 1 else values
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +170,7 @@ def _process_reaction(task: tuple) -> tuple:
             selection=cfg["selection"],
             score_cap=cfg["score_cap"],
             catalyst_atoms=_parse_int_list(row.get("catalyst_atoms")),
-            tether_anchor=_parse_int(row.get("tether_anchor")),
+            tether_anchor=_parse_int_or_list(row.get("tether_anchor")),
         )
 
         if find_optimal_stretch:

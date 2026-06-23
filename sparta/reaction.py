@@ -101,10 +101,11 @@ class Reaction:
         (catalyst-sphere, reaction-sphere) pair, sampling many approach poses for
         broad coverage; ``n_seeds`` then adds random replicates per pose.  Ignored
         when ``tether_anchor`` is given.
-    tether_anchor : int, optional
-        Explicit catalyst atom index to tether to the reaction center, overriding
-        ``tether_mode`` — use when you know which catalyst atom should contact the
-        substrate (e.g. an H-bond donor).
+    tether_anchor : int or list of int, optional
+        Explicit catalyst atom index or indices to tether to the reaction center,
+        overriding ``tether_mode``. A list is treated as alternative explicit
+        anchors, one tether configuration per atom — use when several catalyst
+        atoms could contact the substrate.
     diversity_rmsd : float
         RMSD threshold (Å) for diversity filtering of ``top_k_conformers``.
         Conformer pairs are grouped into "categories" by best-fit RMSD and only
@@ -152,7 +153,7 @@ class Reaction:
         catalyst_bias: float = 0.0,
         catalyst_atoms: Optional[List[int]] = None,
         tether_mode: str = "center",
-        tether_anchor: Optional[int] = None,
+        tether_anchor: Optional[Union[int, List[int]]] = None,
         diversity_rmsd: float = 0.5,
         selection: str = "coverage",
         score_cap: Optional[float] = 3.0,
@@ -288,7 +289,12 @@ class Reaction:
             self.catalyst_atoms = (
                 list(catalyst_atoms) if catalyst_atoms is not None else None
             )
-            self.tether_anchor = tether_anchor
+            if isinstance(tether_anchor, (list, tuple, set)):
+                self.tether_anchor = [int(anchor) for anchor in tether_anchor]
+            elif tether_anchor is None:
+                self.tether_anchor = None
+            else:
+                self.tether_anchor = int(tether_anchor)
             self._build_catalyst_leash(catalyst_bias)
         self.n_tether_configs: int = max(1, len(self._leashed_reac_bms))
 
@@ -391,7 +397,7 @@ class Reaction:
         is the changing-bond atoms *not* in the catalyst — for a multi-component
         reaction, the shared center of the reacting molecules.
 
-        - explicit ``tether_anchor``: one config, one edge.
+        - explicit ``tether_anchor``: one config per anchor, one edge each.
         - 'center': one config tethering each catalyst fragment's centroid heavy
           atom to the reaction-center centroid (head-on).
         - 'explore': cover the catalyst and the reaction center with
@@ -432,7 +438,12 @@ class Reaction:
         rxn_center = self._central_atom(center_atoms, self.reac_ref_coords)
 
         if self.tether_anchor is not None:
-            raw = [[(self.tether_anchor, rxn_center)]]
+            anchors = (
+                self.tether_anchor
+                if isinstance(self.tether_anchor, list)
+                else [self.tether_anchor]
+            )
+            raw = [[(anchor, rxn_center)] for anchor in anchors]
         elif self.tether_mode == "center":
             raw = [[(self._central_atom(heavy(f), self.reac_ref_coords), rxn_center)
                     for f in cat_frags]]
