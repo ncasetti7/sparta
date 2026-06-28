@@ -28,7 +28,14 @@ from rdkit import Chem, DistanceGeometry
 from rdkit.Chem import rdDistGeom, rdmolops
 
 from sparta import cheminformatics
-from sparta.stereochemistry import log_stereo_state, tetrahedral_stereo_references
+from sparta.stereochemistry import (
+    alkene_stereo_references,
+    atropisomer_stereo_references,
+    log_alkene_state,
+    log_atropisomer_state,
+    log_stereo_state,
+    tetrahedral_stereo_references,
+)
 
 
 class Reaction:
@@ -225,8 +232,26 @@ class Reaction:
         self.prod_ref_coords: np.ndarray = prod_ref_coords
         self.reactant_stereo_refs = tetrahedral_stereo_references(reac_ref, reac_ref_coords)
         self.product_stereo_refs = tetrahedral_stereo_references(prod_ref, prod_ref_coords)
+        self.reactant_alkene_refs = alkene_stereo_references(reac_ref, reac_ref_coords)
+        self.product_alkene_refs = alkene_stereo_references(prod_ref, prod_ref_coords)
+        self.reactant_atropisomer_refs = atropisomer_stereo_references(reac_ref, reac_ref_coords)
+        self.product_atropisomer_refs = atropisomer_stereo_references(prod_ref, prod_ref_coords)
         log_stereo_state(self, "reactant reference", reac_ref_coords, self.reactant_stereo_refs)
         log_stereo_state(self, "product reference", prod_ref_coords, self.product_stereo_refs)
+        log_alkene_state(self, "reactant reference", reac_ref_coords, self.reactant_alkene_refs)
+        log_alkene_state(self, "product reference", prod_ref_coords, self.product_alkene_refs)
+        log_atropisomer_state(
+            self,
+            "reactant reference",
+            reac_ref_coords,
+            self.reactant_atropisomer_refs,
+        )
+        log_atropisomer_state(
+            self,
+            "product reference",
+            prod_ref_coords,
+            self.product_atropisomer_refs,
+        )
 
         self.reac_bond_lengths: Dict[Tuple[int, int], float] = {}
         self.prod_bond_lengths: Dict[Tuple[int, int], float] = {}

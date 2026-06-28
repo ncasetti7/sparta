@@ -21,8 +21,13 @@ from sparta.cheminformatics import add_coords_to_mol, add_more_coords_to_mol
 from sparta.initial_generation.dg_optimizer import optimize_to_bounds_matrix_and_rmsd
 from sparta.iterative_alignment.force_propagation import transform_mol
 from sparta.stereochemistry import (
+    alkene_stereo_matches,
+    atropisomer_stereo_matches,
     chiral_constraints_from_references,
+    correct_alkene_stereochemistry,
     correct_tetrahedral_stereochemistry,
+    log_alkene_state,
+    log_atropisomer_state,
     log_stereo_state,
     stereo_matches,
 )
@@ -154,12 +159,26 @@ def _generate_reaction_conformers_single(
     # reference. The pushforward/relaxation path must match these before a
     # conformer can feed downstream TS seeding.
     product_stereo_refs = reaction.product_stereo_refs
+    product_alkene_refs = reaction.product_alkene_refs
+    product_atropisomer_refs = reaction.product_atropisomer_refs
     product_chiral = chiral_constraints_from_references(product_stereo_refs)
     log_stereo_state(
         reaction,
         f"embedded product reference seed={seed} stretch={stretch_factor}",
         temp_prod.GetConformer().GetPositions(),
         product_stereo_refs,
+    )
+    log_alkene_state(
+        reaction,
+        f"embedded product reference seed={seed} stretch={stretch_factor}",
+        temp_prod.GetConformer().GetPositions(),
+        product_alkene_refs,
+    )
+    log_atropisomer_state(
+        reaction,
+        f"embedded product reference seed={seed} stretch={stretch_factor}",
+        temp_prod.GetConformer().GetPositions(),
+        product_atropisomer_refs,
     )
 
     # For each reactant conformer, derive a paired product conformer
@@ -172,12 +191,36 @@ def _generate_reaction_conformers_single(
             reactant_coords,
             reaction.reactant_stereo_refs,
         )
+        log_alkene_state(
+            reaction,
+            f"reactant conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+            reactant_coords,
+            reaction.reactant_alkene_refs,
+        )
+        log_atropisomer_state(
+            reaction,
+            f"reactant conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+            reactant_coords,
+            reaction.reactant_atropisomer_refs,
+        )
         transformed_coords = transform_mol(reactant_coords, temp_prod, changing_bonds)
         log_stereo_state(
             reaction,
             f"product pushforward conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
             transformed_coords,
             product_stereo_refs,
+        )
+        log_alkene_state(
+            reaction,
+            f"product pushforward conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+            transformed_coords,
+            product_alkene_refs,
+        )
+        log_atropisomer_state(
+            reaction,
+            f"product pushforward conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+            transformed_coords,
+            product_atropisomer_refs,
         )
         if not stereo_matches(transformed_coords, product_stereo_refs):
             transformed_coords = correct_tetrahedral_stereochemistry(
@@ -190,6 +233,18 @@ def _generate_reaction_conformers_single(
                 f"product pushforward corrected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
                 transformed_coords,
                 product_stereo_refs,
+            )
+        if not alkene_stereo_matches(transformed_coords, product_alkene_refs):
+            transformed_coords = correct_alkene_stereochemistry(
+                transformed_coords,
+                product_mol,
+                product_alkene_refs,
+            )
+            log_alkene_state(
+                reaction,
+                f"product pushforward alkene-corrected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                transformed_coords,
+                product_alkene_refs,
             )
         final_product_coords = optimize_to_bounds_matrix_and_rmsd(
             transformed_coords,
@@ -207,17 +262,49 @@ def _generate_reaction_conformers_single(
             final_product_coords,
             product_stereo_refs,
         )
-        if not stereo_matches(final_product_coords, product_stereo_refs):
+        log_alkene_state(
+            reaction,
+            f"product first relax conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+            final_product_coords,
+            product_alkene_refs,
+        )
+        log_atropisomer_state(
+            reaction,
+            f"product first relax conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+            final_product_coords,
+            product_atropisomer_refs,
+        )
+        if (
+            not stereo_matches(final_product_coords, product_stereo_refs)
+            or not alkene_stereo_matches(final_product_coords, product_alkene_refs)
+        ):
             corrected_coords = correct_tetrahedral_stereochemistry(
                 final_product_coords,
                 product_mol,
                 product_stereo_refs,
+            )
+            corrected_coords = correct_alkene_stereochemistry(
+                corrected_coords,
+                product_mol,
+                product_alkene_refs,
             )
             log_stereo_state(
                 reaction,
                 f"product corrected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
                 corrected_coords,
                 product_stereo_refs,
+            )
+            log_alkene_state(
+                reaction,
+                f"product corrected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                corrected_coords,
+                product_alkene_refs,
+            )
+            log_atropisomer_state(
+                reaction,
+                f"product corrected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                corrected_coords,
+                product_atropisomer_refs,
             )
             final_product_coords = optimize_to_bounds_matrix_and_rmsd(
                 corrected_coords,
@@ -235,12 +322,40 @@ def _generate_reaction_conformers_single(
                 final_product_coords,
                 product_stereo_refs,
             )
-        if not stereo_matches(final_product_coords, product_stereo_refs):
+            log_alkene_state(
+                reaction,
+                f"product corrected relax conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                final_product_coords,
+                product_alkene_refs,
+            )
+            log_atropisomer_state(
+                reaction,
+                f"product corrected relax conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                final_product_coords,
+                product_atropisomer_refs,
+            )
+        if (
+            not stereo_matches(final_product_coords, product_stereo_refs)
+            or not alkene_stereo_matches(final_product_coords, product_alkene_refs)
+            or not atropisomer_stereo_matches(final_product_coords, product_atropisomer_refs)
+        ):
             log_stereo_state(
                 reaction,
                 f"product rejected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
                 final_product_coords,
                 product_stereo_refs,
+            )
+            log_alkene_state(
+                reaction,
+                f"product rejected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                final_product_coords,
+                product_alkene_refs,
+            )
+            log_atropisomer_state(
+                reaction,
+                f"product rejected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                final_product_coords,
+                product_atropisomer_refs,
             )
             continue
         product_mol = add_more_coords_to_mol(final_product_coords, product_mol)

@@ -100,6 +100,21 @@ class TestIDPP:
         e2 = atoms2.get_potential_energy()
         assert e4 != e2
 
+    def test_cache_is_invalidated_only_by_position_changes(self):
+        initial = np.array([[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]])
+        final = np.array([[0.0, 0.0, 0.0], [2.8, 0.0, 0.0]])
+        atoms = _make_atoms(initial.copy())
+        calc = IDPP(initial, final, alpha=0.5)
+        calc.calculate(atoms, properties=["energy"])
+
+        changed_symbols = atoms.copy()
+        changed_symbols.set_chemical_symbols(["H", "H"])
+        assert calc.check_state(changed_symbols) == []
+
+        moved = atoms.copy()
+        moved.positions[0, 0] += 0.1
+        assert calc.check_state(moved) == ["positions"]
+
     def test_forces_match_finite_differences(self):
         """Analytic forces must equal -dE/dr from central finite differences."""
         np.random.seed(42)

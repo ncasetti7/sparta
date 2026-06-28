@@ -26,12 +26,87 @@ class TetrahedralStereoReference:
     margin: float
 
 
+@dataclass(frozen=True)
+class AlkeneStereoReference:
+    """Reference geometry for one defined E/Z alkene."""
+
+    bond: Tuple[int, int]
+    substituents: Tuple[int, int]
+    priority_ranks: Tuple[int, int]
+    label: str
+    sign: float
+    value: float
+    margin: float
+
+
+@dataclass(frozen=True)
+class AtropisomerStereoReference:
+    """Reference geometry for one defined atropisomeric axis."""
+
+    bond_index: int
+    axis: Tuple[int, int]
+    controlling_atoms: Tuple[int, int, int, int]
+    descriptor_atoms: Tuple[int, int]
+    label: str
+    sign: float
+    value: float
+    angle: float
+    margin: float
+
+
 def chiral_volume(coords: np.ndarray, center: int, i: int, j: int, k: int) -> float:
     """Return signed tetrahedral volume for ``center`` and three neighbours."""
     return float(
         (coords[i] - coords[center])
         @ np.cross(coords[j] - coords[center], coords[k] - coords[center])
     )
+
+
+def alkene_side_value(coords: np.ndarray, a: int, b: int, i: int, j: int) -> float:
+    """Return side descriptor for substituents i/j around double bond a=b."""
+    positions = np.asarray(coords, dtype=float)
+    axis = positions[b] - positions[a]
+    axis_norm = np.linalg.norm(axis)
+    if axis_norm < 1e-10:
+        return 0.0
+    axis = axis / axis_norm
+    vi = positions[i] - positions[a]
+    vj = positions[j] - positions[b]
+    vi = vi - np.dot(vi, axis) * axis
+    vj = vj - np.dot(vj, axis) * axis
+    ni = np.linalg.norm(vi)
+    nj = np.linalg.norm(vj)
+    if ni < 1e-10 or nj < 1e-10:
+        return 0.0
+    return float(np.dot(vi / ni, vj / nj))
+
+
+def _dihedral_angle(coords: np.ndarray, i: int, j: int, k: int, l: int) -> float:
+    """Return signed dihedral angle in radians for i-j-k-l."""
+    positions = np.asarray(coords, dtype=float)
+    b0 = positions[i] - positions[j]
+    b1 = positions[k] - positions[j]
+    b2 = positions[l] - positions[k]
+    norm = np.linalg.norm(b1)
+    if norm < 1e-10:
+        return 0.0
+    b1 = b1 / norm
+    v = b0 - np.dot(b0, b1) * b1
+    w = b2 - np.dot(b2, b1) * b1
+    nv = np.linalg.norm(v)
+    nw = np.linalg.norm(w)
+    if nv < 1e-10 or nw < 1e-10:
+        return 0.0
+    v = v / nv
+    w = w / nw
+    x = np.dot(v, w)
+    y = np.dot(np.cross(b1, v), w)
+    return float(np.arctan2(y, x))
+
+
+def atropisomer_axis_value(coords: np.ndarray, a: int, b: int, i: int, j: int) -> float:
+    """Return signed axial descriptor for substituents i/j around axis a-b."""
+    return float(np.sin(_dihedral_angle(coords, i, a, b, j)))
 
 
 def _cip_ranked_neighbors(atom: Chem.Atom) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
@@ -54,6 +129,19 @@ def _unmapped_stereo_copy(mol: Chem.Mol) -> Chem.Mol:
     for atom in copied.GetAtoms():
         atom.SetAtomMapNum(0)
     return copied
+
+
+def _highest_priority_neighbor(atom: Chem.Atom, exclude: int) -> Tuple[int, int] | None:
+    """Return highest-CIP-rank explicit neighbor other than ``exclude``."""
+    ranked = []
+    for neighbor in atom.GetNeighbors():
+        if neighbor.GetIdx() == exclude or not neighbor.HasProp("_CIPRank"):
+            continue
+        ranked.append((neighbor.GetIdx(), int(neighbor.GetProp("_CIPRank"))))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (-item[1], item[0]))
+    return ranked[0]
 
 
 def tetrahedral_stereo_references(
@@ -106,6 +194,122 @@ def tetrahedral_stereo_references(
     return references
 
 
+def alkene_stereo_references(
+    mol: Chem.Mol,
+    coords: np.ndarray | None = None,
+) -> List[AlkeneStereoReference]:
+    """
+    Build reference labels and side descriptors for defined E/Z alkenes.
+
+    Atom maps are stripped before RDKit assigns stereochemistry and CIP ranks, so
+    reaction-map bookkeeping cannot alter chemical priority. Original atom
+    indices are retained for coordinate descriptors.
+    """
+    stereo_mol = _unmapped_stereo_copy(mol)
+    Chem.AssignStereochemistry(stereo_mol, force=True, cleanIt=True)
+    positions = (
+        np.asarray(coords, dtype=float)
+        if coords is not None
+        else np.asarray(mol.GetConformer().GetPositions(), dtype=float)
+    )
+    references: List[AlkeneStereoReference] = []
+    for bond in stereo_mol.GetBonds():
+        if bond.GetBondType() != Chem.BondType.DOUBLE:
+            continue
+        stereo = bond.GetStereo()
+        if stereo not in (Chem.BondStereo.STEREOE, Chem.BondStereo.STEREOZ):
+            continue
+        a = bond.GetBeginAtomIdx()
+        b = bond.GetEndAtomIdx()
+        left = _highest_priority_neighbor(stereo_mol.GetAtomWithIdx(a), b)
+        right = _highest_priority_neighbor(stereo_mol.GetAtomWithIdx(b), a)
+        if left is None or right is None:
+            continue
+        i, rank_i = left
+        j, rank_j = right
+        value = alkene_side_value(positions, a, b, i, j)
+        if abs(value) < 1e-6:
+            continue
+        references.append(
+            AlkeneStereoReference(
+                bond=(a, b),
+                substituents=(i, j),
+                priority_ranks=(rank_i, rank_j),
+                label="E" if stereo == Chem.BondStereo.STEREOE else "Z",
+                sign=1.0 if value > 0.0 else -1.0,
+                value=value,
+                margin=0.5 * abs(value),
+            )
+        )
+    return references
+
+
+def atropisomer_stereo_references(
+    mol: Chem.Mol,
+    coords: np.ndarray | None = None,
+) -> List[AtropisomerStereoReference]:
+    """
+    Build reference labels and signed torsion descriptors for atropisomer axes.
+
+    RDKit represents atropisomerism as bond stereo, usually serialized in
+    CXSMILES as ``|wU:...|`` or ``|wD:...|`` fields. The graph is copied and atom
+    maps are stripped before stereo perception, while original atom indices are
+    retained for coordinate descriptors.
+    """
+    stereo_mol = _unmapped_stereo_copy(mol)
+    Chem.AssignStereochemistry(stereo_mol, force=True, cleanIt=True)
+    try:
+        stereo_infos = Chem.FindPotentialStereo(stereo_mol, cleanIt=True, flagPossible=True)
+    except RuntimeError:
+        stereo_infos = []
+    positions = (
+        np.asarray(coords, dtype=float)
+        if coords is not None
+        else np.asarray(mol.GetConformer().GetPositions(), dtype=float)
+    )
+    references: List[AtropisomerStereoReference] = []
+    for info in stereo_infos:
+        if info.type != Chem.StereoType.Bond_Atropisomer:
+            continue
+        if info.specified != Chem.StereoSpecified.Specified:
+            continue
+        bond_idx = int(info.centeredOn)
+        if bond_idx < 0 or bond_idx >= stereo_mol.GetNumBonds():
+            continue
+        bond = stereo_mol.GetBondWithIdx(bond_idx)
+        stereo = bond.GetStereo()
+        if stereo not in (Chem.BondStereo.STEREOATROPCW, Chem.BondStereo.STEREOATROPCCW):
+            continue
+        controlling = tuple(int(idx) for idx in info.controllingAtoms)
+        if len(controlling) != 4:
+            continue
+        a = bond.GetBeginAtomIdx()
+        b = bond.GetEndAtomIdx()
+        left = [idx for idx in controlling if stereo_mol.GetBondBetweenAtoms(a, idx) is not None]
+        right = [idx for idx in controlling if stereo_mol.GetBondBetweenAtoms(b, idx) is not None]
+        if not left or not right:
+            continue
+        i, j = left[0], right[0]
+        angle = _dihedral_angle(positions, i, a, b, j)
+        value = float(np.sin(angle))
+        if abs(value) < 1e-6:
+            continue
+        references.append(
+            AtropisomerStereoReference(
+                bond_index=bond_idx,
+                axis=(a, b),
+                controlling_atoms=controlling,
+                descriptor_atoms=(i, j),
+                label="CW" if stereo == Chem.BondStereo.STEREOATROPCW else "CCW",
+                sign=1.0 if value > 0.0 else -1.0,
+                value=value,
+                angle=angle,
+                margin=0.5 * abs(value),
+            )
+        )
+    return references
+
+
 def chiral_constraints_from_references(
     references: Iterable[TetrahedralStereoReference],
 ) -> List[ChiralVolumeConstraint]:
@@ -141,6 +345,58 @@ def stereo_matches(
     return not stereo_mismatches(coords, references, require_margin=require_margin)
 
 
+def alkene_stereo_mismatches(
+    coords: np.ndarray,
+    references: Sequence[AlkeneStereoReference],
+    require_margin: bool = False,
+) -> List[AlkeneStereoReference]:
+    """Return E/Z references whose side descriptor is wrong in ``coords``."""
+    mismatches = []
+    for ref in references:
+        a, b = ref.bond
+        i, j = ref.substituents
+        value = alkene_side_value(coords, a, b, i, j)
+        threshold = ref.margin if require_margin else 0.0
+        if ref.sign * value <= threshold:
+            mismatches.append(ref)
+    return mismatches
+
+
+def alkene_stereo_matches(
+    coords: np.ndarray,
+    references: Sequence[AlkeneStereoReference],
+    require_margin: bool = False,
+) -> bool:
+    """Return True when all referenced E/Z alkenes have the target side sign."""
+    return not alkene_stereo_mismatches(coords, references, require_margin=require_margin)
+
+
+def atropisomer_stereo_mismatches(
+    coords: np.ndarray,
+    references: Sequence[AtropisomerStereoReference],
+    require_margin: bool = False,
+) -> List[AtropisomerStereoReference]:
+    """Return atropisomer references whose signed axis descriptor is wrong."""
+    mismatches = []
+    for ref in references:
+        a, b = ref.axis
+        i, j = ref.descriptor_atoms
+        value = atropisomer_axis_value(coords, a, b, i, j)
+        threshold = ref.margin if require_margin else 0.0
+        if ref.sign * value <= threshold:
+            mismatches.append(ref)
+    return mismatches
+
+
+def atropisomer_stereo_matches(
+    coords: np.ndarray,
+    references: Sequence[AtropisomerStereoReference],
+    require_margin: bool = False,
+) -> bool:
+    """Return True when all referenced atropisomer axes have the target sign."""
+    return not atropisomer_stereo_mismatches(coords, references, require_margin=require_margin)
+
+
 def stereo_debug_enabled(owner=None) -> bool:
     """Return True when stereochemistry diagnostics are explicitly enabled."""
     if owner is not None and getattr(owner, "stereo_debug", False):
@@ -173,6 +429,54 @@ def format_stereo_state(
     return "\n".join(lines)
 
 
+def format_alkene_state(
+    label: str,
+    coords: np.ndarray,
+    references: Sequence[AlkeneStereoReference],
+) -> str:
+    """Format E/Z reference-vs-current side descriptors for debugging."""
+    lines = [f"[SPARTA stereo] {label}: {len(references)} alkene E/Z reference(s)"]
+    for ref in references:
+        a, b = ref.bond
+        i, j = ref.substituents
+        value = alkene_side_value(coords, a, b, i, j)
+        signed = ref.sign * value
+        status = "OK" if signed > 0.0 else "MISMATCH"
+        lines.append(
+            "[SPARTA stereo] "
+            f"  bond={ref.bond} target={ref.label or '?'} "
+            f"substituents={ref.substituents} "
+            f"priority_ranks={ref.priority_ranks} ref_sign={ref.sign:+.0f} "
+            f"ref_value={ref.value:+.4f} cur_value={value:+.4f} "
+            f"signed={signed:+.4f} {status}"
+        )
+    return "\n".join(lines)
+
+
+def format_atropisomer_state(
+    label: str,
+    coords: np.ndarray,
+    references: Sequence[AtropisomerStereoReference],
+) -> str:
+    """Format atropisomer reference-vs-current signed descriptors for debugging."""
+    lines = [f"[SPARTA stereo] {label}: {len(references)} atropisomer reference(s)"]
+    for ref in references:
+        a, b = ref.axis
+        i, j = ref.descriptor_atoms
+        value = atropisomer_axis_value(coords, a, b, i, j)
+        signed = ref.sign * value
+        status = "OK" if signed > 0.0 else "MISMATCH"
+        lines.append(
+            "[SPARTA stereo] "
+            f"  bond={ref.axis} target={ref.label or '?'} "
+            f"controlling_atoms={ref.controlling_atoms} "
+            f"descriptor_atoms={ref.descriptor_atoms} ref_sign={ref.sign:+.0f} "
+            f"ref_value={ref.value:+.4f} cur_value={value:+.4f} "
+            f"signed={signed:+.4f} {status}"
+        )
+    return "\n".join(lines)
+
+
 def log_stereo_state(
     owner,
     label: str,
@@ -184,12 +488,50 @@ def log_stereo_state(
         print(format_stereo_state(label, coords, references))
 
 
+def log_alkene_state(
+    owner,
+    label: str,
+    coords: np.ndarray,
+    references: Sequence[AlkeneStereoReference],
+) -> None:
+    """Print E/Z diagnostics only when explicitly enabled."""
+    if stereo_debug_enabled(owner):
+        print(format_alkene_state(label, coords, references))
+
+
+def log_atropisomer_state(
+    owner,
+    label: str,
+    coords: np.ndarray,
+    references: Sequence[AtropisomerStereoReference],
+) -> None:
+    """Print atropisomer diagnostics only when explicitly enabled."""
+    if stereo_debug_enabled(owner):
+        print(format_atropisomer_state(label, coords, references))
+
+
 def stereocenter_flipped(
     coords: np.ndarray,
     references: Sequence[TetrahedralStereoReference],
 ) -> bool:
     """Return True if any recorded stereocenter changes signed-volume sign."""
     return not stereo_matches(coords, references, require_margin=False)
+
+
+def alkene_stereo_flipped(
+    coords: np.ndarray,
+    references: Sequence[AlkeneStereoReference],
+) -> bool:
+    """Return True if any recorded E/Z alkene changes side-descriptor sign."""
+    return not alkene_stereo_matches(coords, references, require_margin=False)
+
+
+def atropisomer_stereo_flipped(
+    coords: np.ndarray,
+    references: Sequence[AtropisomerStereoReference],
+) -> bool:
+    """Return True if any recorded atropisomer axis changes descriptor sign."""
+    return not atropisomer_stereo_matches(coords, references, require_margin=False)
 
 
 def reflect_atoms_across_plane(
@@ -208,6 +550,33 @@ def reflect_atoms_across_plane(
     selected = list(atom_indices)
     displacement = new_coords[selected] - p0
     new_coords[selected] -= 2.0 * (displacement @ normal)[:, None] * normal
+    return new_coords
+
+
+def rotate_atoms_around_axis(
+    coords: np.ndarray,
+    atom_indices: Iterable[int],
+    axis_points: Tuple[int, int],
+    angle: float,
+) -> np.ndarray:
+    """Rotate selected atoms around the axis defined by two atom indices."""
+    new_coords = np.asarray(coords, dtype=float).copy()
+    p0, p1 = (new_coords[idx] for idx in axis_points)
+    axis = p1 - p0
+    norm = np.linalg.norm(axis)
+    if norm < 1e-10:
+        return new_coords
+    axis = axis / norm
+    selected = list(atom_indices)
+    cos_a = float(np.cos(angle))
+    sin_a = float(np.sin(angle))
+    rel = new_coords[selected] - p0
+    rotated = (
+        rel * cos_a
+        + np.cross(axis, rel) * sin_a
+        + axis * (rel @ axis)[:, None] * (1.0 - cos_a)
+    )
+    new_coords[selected] = p0 + rotated
     return new_coords
 
 
@@ -239,6 +608,26 @@ def _movable_substituent(
         if not branch:
             continue
         if branch & (all_neighbors - {neighbor}):
+            continue
+        candidates.append((neighbor, branch))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: len(item[1]))
+
+
+def _movable_alkene_substituent(
+    mol: Chem.Mol,
+    ref: AlkeneStereoReference,
+) -> Tuple[int, set[int]] | None:
+    """Choose a clean alkene substituent branch to rotate around the double bond."""
+    a, b = ref.bond
+    i, j = ref.substituents
+    candidates = []
+    for center, neighbor, blocked in ((a, i, b), (b, j, a)):
+        branch = _substituent_atoms(mol, center, neighbor)
+        if not branch:
+            continue
+        if blocked in branch:
             continue
         candidates.append((neighbor, branch))
     if not candidates:
@@ -278,6 +667,37 @@ def correct_tetrahedral_stereochemistry(
                 branch,
                 (ref.center, plane_neighbors[0], plane_neighbors[1]),
             )
+            changed = True
+        if not changed:
+            break
+    return fixed
+
+
+def correct_alkene_stereochemistry(
+    coords: np.ndarray,
+    mol: Chem.Mol,
+    references: Sequence[AlkeneStereoReference],
+    max_passes: int = 4,
+) -> np.ndarray:
+    """
+    Rotate clean substituent branches until E/Z side signs match references.
+
+    This is a coordinate repair for generated product conformers, not a physical
+    alkene isomerization model. Ring-tied or otherwise non-separable substituent
+    branches are left for validation/rejection.
+    """
+    fixed = np.asarray(coords, dtype=float).copy()
+    for _ in range(max_passes):
+        mismatches = alkene_stereo_mismatches(fixed, references)
+        if not mismatches:
+            break
+        changed = False
+        for ref in mismatches:
+            movable = _movable_alkene_substituent(mol, ref)
+            if movable is None:
+                continue
+            _, branch = movable
+            fixed = rotate_atoms_around_axis(fixed, branch, ref.bond, np.pi)
             changed = True
         if not changed:
             break

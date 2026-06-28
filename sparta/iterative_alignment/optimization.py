@@ -26,7 +26,14 @@ from sparta.iterative_alignment.force_propagation import (
     compute_endpoint_gradient_total,
 )
 from sparta.iterative_alignment.idpp import IDPP, create_idpp_calculators
-from sparta.stereochemistry import log_stereo_state, stereocenter_flipped
+from sparta.stereochemistry import (
+    alkene_stereo_flipped,
+    atropisomer_stereo_flipped,
+    log_alkene_state,
+    log_atropisomer_state,
+    log_stereo_state,
+    stereocenter_flipped,
+)
 
 if TYPE_CHECKING:
     from sparta.calculation.base import Calculation
@@ -320,8 +327,26 @@ def _run_alignment_single(
     # so any step that inverts one of these is rejected below.
     reac_chiral = reaction.reactant_stereo_refs
     prod_chiral = reaction.product_stereo_refs
+    reac_alkene = reaction.reactant_alkene_refs
+    prod_alkene = reaction.product_alkene_refs
+    reac_atropisomer = reaction.reactant_atropisomer_refs
+    prod_atropisomer = reaction.product_atropisomer_refs
     log_stereo_state(reaction, "alignment start reactant endpoint", reactant_coords, reac_chiral)
     log_stereo_state(reaction, "alignment start product endpoint", product_coords, prod_chiral)
+    log_alkene_state(reaction, "alignment start reactant endpoint", reactant_coords, reac_alkene)
+    log_alkene_state(reaction, "alignment start product endpoint", product_coords, prod_alkene)
+    log_atropisomer_state(
+        reaction,
+        "alignment start reactant endpoint",
+        reactant_coords,
+        reac_atropisomer,
+    )
+    log_atropisomer_state(
+        reaction,
+        "alignment start product endpoint",
+        product_coords,
+        prod_atropisomer,
+    )
 
     # Extract symmetric bounds matrices and relax to current structures
     bl_init, bu_init = _extract_symmetric_bounds(reactant_bounds_matrix)
@@ -436,11 +461,21 @@ def _run_alignment_single(
                 step_size=current_step, max_displacement=current_step,
             )
 
-            # Chirality guard: reject any step that inverts a stereocenter, since
-            # the IDPP force and the distance-bounds projection are both
-            # chirality-blind and would otherwise lock in a flip.
+            # Stereo guard: reject any step that inverts a recorded stereochemical
+            # descriptor, since the IDPP force and distance-bounds projection are
+            # stereo-blind and would otherwise lock in a flip.
             if (stereocenter_flipped(reac_atoms.get_positions(), reac_chiral)
-                    or stereocenter_flipped(prod_atoms.get_positions(), prod_chiral)):
+                    or stereocenter_flipped(prod_atoms.get_positions(), prod_chiral)
+                    or alkene_stereo_flipped(reac_atoms.get_positions(), reac_alkene)
+                    or alkene_stereo_flipped(prod_atoms.get_positions(), prod_alkene)
+                    or atropisomer_stereo_flipped(
+                        reac_atoms.get_positions(),
+                        reac_atropisomer,
+                    )
+                    or atropisomer_stereo_flipped(
+                        prod_atoms.get_positions(),
+                        prod_atropisomer,
+                    )):
                 log_stereo_state(
                     reaction,
                     f"alignment rejected reactant step={current_step:.4f}",
@@ -453,8 +488,32 @@ def _run_alignment_single(
                     prod_atoms.get_positions(),
                     prod_chiral,
                 )
+                log_alkene_state(
+                    reaction,
+                    f"alignment rejected reactant step={current_step:.4f}",
+                    reac_atoms.get_positions(),
+                    reac_alkene,
+                )
+                log_alkene_state(
+                    reaction,
+                    f"alignment rejected product step={current_step:.4f}",
+                    prod_atoms.get_positions(),
+                    prod_alkene,
+                )
+                log_atropisomer_state(
+                    reaction,
+                    f"alignment rejected reactant step={current_step:.4f}",
+                    reac_atoms.get_positions(),
+                    reac_atropisomer,
+                )
+                log_atropisomer_state(
+                    reaction,
+                    f"alignment rejected product step={current_step:.4f}",
+                    prod_atoms.get_positions(),
+                    prod_atropisomer,
+                )
                 if verbose:
-                    print(f"  Rejected step {current_step:.4f}: stereocenter flip")
+                    print(f"  Rejected step {current_step:.4f}: stereochemistry flip")
                 reac_atoms.set_positions(reac_pos_before)
                 prod_atoms.set_positions(prod_pos_before)
                 current_step *= 0.5

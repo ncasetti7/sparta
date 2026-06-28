@@ -66,9 +66,10 @@ def generate_conformer(mol: Chem.Mol, smiles: str, seed: Optional[int]) -> Chem.
     if result != 0:
         raise ValueError("Could not embed molecule.")
 
-    if "." in smiles:
+    graph_smiles = smiles.split()[0]
+    if "." in graph_smiles:
         final_coords_symbols = {}
-        for i, smi in enumerate(smiles.split(".")):
+        for i, smi in enumerate(graph_smiles.split(".")):
             translation = [0.0, 0.0, 0.0]
             if i < 3:
                 translation[i] = 5.0

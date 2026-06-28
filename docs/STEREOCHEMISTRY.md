@@ -29,18 +29,21 @@ computes stereochemical reference labels on map-stripped molecule copies.
 Implemented now:
 
 - Tetrahedral stereocenters with defined SMILES stereochemistry.
+- E/Z alkenes with defined SMILES stereochemistry.
+- Atropisomeric axes with defined RDKit/CXSMILES bond stereochemistry.
 - Reference extraction from independently embedded reactant and product graphs.
 - Signed-volume constraints for initial product conformer relaxation.
 - Conservative branch reflection to repair flipped tetrahedral centers.
+- Conservative substituent-branch rotation to repair flipped product E/Z alkenes.
 - Iterative-alignment guards that reject endpoint steps which invert recorded
-  tetrahedral signed volumes.
+  tetrahedral signed volumes, E/Z side descriptors, or atropisomer axis
+  descriptors.
 - Opt-in debug logging through `Reaction(..., stereo_debug=True)` or
   `SPARTA_STEREO_DEBUG=1`.
 
 Not implemented yet:
 
-- E/Z alkene reference extraction and enforcement.
-- Atropisomeric axis reference extraction and enforcement.
+- Coordinate repair or optimizer penalties for atropisomeric axis inversions.
 - Square planar, trigonal bipyramidal, octahedral, or other non-tetrahedral
   stereochemical elements.
 - Full stereochemical validation of TS or IRC calculations after SPARTA hands off
@@ -176,6 +179,81 @@ This is why the code never uses arbitrary neighbor order to define chirality.
 Neighbor order can change with parsing, renumbering, or graph edits. Priority
 order is the chemically meaningful choice.
 
+## Alkene E/Z Reference Model
+
+The current E/Z reference is represented by `AlkeneStereoReference`:
+
+```python
+bond: tuple[int, int]
+substituents: tuple[int, int]
+priority_ranks: tuple[int, int]
+label: str
+sign: float
+value: float
+margin: float
+```
+
+Reference extraction:
+
+1. Copy the molecule and clear atom maps.
+2. Assign stereochemistry on the map-stripped copy.
+3. Find double bonds with defined RDKit E/Z stereo.
+4. On each double-bond atom, select the highest-priority explicit substituent
+   excluding the other double-bond atom.
+5. Compute a side descriptor from the coordinate projections of those two
+   substituents onto the plane perpendicular to the double-bond axis.
+6. Store the sign and label from the reference conformer.
+
+The side descriptor is positive when the two highest-priority substituents point
+to the same side of the double-bond axis (Z-like) and negative when they point to
+opposite sides (E-like). Maintaining the sign maintains the E/Z configuration.
+
+When a generated product conformer has the wrong E/Z sign, SPARTA attempts a
+conservative repair by rotating the smallest clean substituent branch 180 degrees
+around the double-bond axis. This is a coordinate repair for conformer generation,
+not a physical alkene isomerization model. Ring-tied alkenes or non-separable
+substituent branches are left for validation and rejection.
+
+## Atropisomer Reference Model
+
+The current atropisomer reference is represented by
+`AtropisomerStereoReference`:
+
+```python
+bond_index: int
+axis: tuple[int, int]
+controlling_atoms: tuple[int, int, int, int]
+descriptor_atoms: tuple[int, int]
+label: str
+sign: float
+value: float
+angle: float
+margin: float
+```
+
+RDKit represents atropisomerism as bond stereo. In SMILES workflows this is
+normally serialized through CXSMILES fields such as `|wU:...|` or `|wD:...|`,
+which parse to `BondStereo.STEREOATROPCW` or
+`BondStereo.STEREOATROPCCW`.
+
+Reference extraction:
+
+1. Copy the molecule and clear atom maps.
+2. Assign stereochemistry on the map-stripped copy.
+3. Use `Chem.FindPotentialStereo(...)` to find specified
+   `Bond_Atropisomer` elements.
+4. Store the RDKit controlling atoms and the axis bond.
+5. Compute a signed axial descriptor as the sine of a dihedral through one
+   controlling atom on each side of the axis.
+6. Store the sign and RDKit CW/CCW label from the reference conformer.
+
+Maintaining the descriptor sign maintains the reference axial handedness for the
+chosen graph and coordinate convention. Product conformers that mismatch the
+target atropisomer sign are currently rejected rather than repaired. A future
+repair path should explicitly rotate an appropriate separable fragment around
+the single-bond axis and then re-relax, while respecting the fact that this is an
+actual atropisomer interconversion coordinate.
+
 ## Initial Generation
 
 Initial conformer generation happens in
@@ -185,17 +263,21 @@ Relevant steps:
 
 1. RDKit embeds reactant conformers with `embed_params.enforceChirality = True`.
 2. RDKit embeds one product reference conformer with the same chirality setting.
-3. Product stereo references are taken from `reaction.product_stereo_refs`, not
+3. Product stereo references are taken from `reaction.product_stereo_refs`,
+   `reaction.product_alkene_refs`, and `reaction.product_atropisomer_refs`, not
    inferred from each pushed-forward conformer.
 4. Reactant coordinates are pushed forward into product topology with
    `transform_mol(...)`.
-5. Product coordinates are relaxed to the product bounds matrix with RMSD tethering
+5. Wrong-side tetrahedral centers or E/Z alkenes are conservatively corrected
+   before the first relaxation when possible.
+6. Product coordinates are relaxed to the product bounds matrix with RMSD tethering
    to the paired reactant.
-6. Tetrahedral signed-volume penalties are passed as `chiral_constraints`.
-7. If the relaxed product mismatches the target signed volumes, SPARTA attempts a
-   conservative branch reflection using `correct_tetrahedral_stereochemistry(...)`.
-8. The corrected geometry is relaxed again with the same chiral constraints.
-9. Product conformers that still mismatch are rejected.
+7. Tetrahedral signed-volume penalties are passed as `chiral_constraints`.
+8. If the relaxed product mismatches the target tetrahedral or E/Z descriptors,
+   SPARTA attempts the conservative repairs again.
+9. The corrected geometry is relaxed again with the same chiral constraints.
+10. Product conformers that still mismatch any tetrahedral, E/Z, or
+    atropisomer reference are rejected.
 
 The chiral penalty lives in
 `sparta/initial_generation/dg_optimizer.py` and has the form:
@@ -215,12 +297,13 @@ Iterative alignment happens in
 `sparta/iterative_alignment/optimization.py`.
 
 IDPP and distance-bounds endpoint propagation are mostly geometric. They do not
-know that changing the signed volume at a tetrahedral center is chemically
-forbidden. SPARTA therefore uses a guard:
+know that changing a tetrahedral signed volume, E/Z side descriptor, or
+atropisomer axis descriptor is chemically forbidden. SPARTA therefore uses a
+guard:
 
-1. At alignment start, load `reaction.reactant_stereo_refs` and
-   `reaction.product_stereo_refs`.
-2. After each proposed endpoint adjustment, compute current signed volumes.
+1. At alignment start, load the reactant and product tetrahedral, E/Z, and
+   atropisomer references.
+2. After each proposed endpoint adjustment, compute current stereo descriptors.
 3. If any reactant or product reference flips sign, reject the step.
 4. Restore the previous endpoints and backtrack to a smaller step size.
 
@@ -354,25 +437,16 @@ Recommended downstream policy:
   against the correct endpoint graph on each side rather than requiring one
   global R/S label throughout.
 
-## Extending Beyond Tetrahedral Centers
+## Extending Beyond Tetrahedral Centers, E/Z Alkenes, And Atropisomers
 
 Add new stereochemical element types under `sparta/stereochemistry/` using the
 same pattern as tetrahedral references.
 
-For E/Z alkenes:
-
-- Extract double bonds with defined stereo from the map-stripped graph.
-- Identify the highest-priority substituent on each alkene atom.
-- Store a signed dihedral or side-of-plane descriptor.
-- Enforce sign during product relaxation and reject sign-changing alignment steps.
-
-For atropisomerism:
-
-- Define the stereogenic axis and the priority substituent on each side.
-- Store a signed torsion descriptor or other robust axis descriptor.
-- Add barriers or guards against crossing through the interconversion geometry.
-- Be careful with cases where the axis is only configurationally stable under
-  specific steric or electronic conditions.
+For atropisomerism, the reference extraction and sign guards exist. Remaining
+work is to add optimizer barriers or a conservative coordinate repair for cases
+where product pushforward lands on the wrong side of the axis. Be careful with
+cases where the axis is only configurationally stable under specific steric or
+electronic conditions.
 
 For all new reference types:
 

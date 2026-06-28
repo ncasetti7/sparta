@@ -5,7 +5,9 @@ import pytest
 from scipy.spatial.distance import cdist
 
 from sparta.initial_generation.dg_optimizer import (
+    _bounds_error_and_gradient,
     _parse_bounds_matrix,
+    _prepare_pair_bounds,
     optimize_to_bounds_matrix,
     optimize_to_bounds_matrix_and_rmsd,
     optimize_to_distance_matrix,
@@ -83,6 +85,35 @@ class TestOptimizeToBoundsMatrix:
     def test_wrong_coord_shape_raises(self):
         with pytest.raises(ValueError):
             optimize_to_bounds_matrix(np.zeros((3, 2)), np.zeros((3, 3)))
+
+    def test_vectorized_gradient_matches_finite_differences(self):
+        rng = np.random.default_rng(11)
+        coords = rng.standard_normal((6, 3))
+        bounds = np.zeros((6, 6, 2))
+        bounds[:, :, 0] = 1.2
+        bounds[:, :, 1] = 1.8
+        pair_data = _prepare_pair_bounds(bounds)
+
+        _, analytic = _bounds_error_and_gradient(
+            coords, *pair_data, weight_lower=1.3, weight_upper=0.7
+        )
+        eps = 1e-6
+        finite_difference = np.zeros_like(coords)
+        for atom_idx in range(len(coords)):
+            for axis in range(3):
+                plus = coords.copy()
+                minus = coords.copy()
+                plus[atom_idx, axis] += eps
+                minus[atom_idx, axis] -= eps
+                e_plus, _ = _bounds_error_and_gradient(
+                    plus, *pair_data, weight_lower=1.3, weight_upper=0.7
+                )
+                e_minus, _ = _bounds_error_and_gradient(
+                    minus, *pair_data, weight_lower=1.3, weight_upper=0.7
+                )
+                finite_difference[atom_idx, axis] = (e_plus - e_minus) / (2 * eps)
+
+        np.testing.assert_allclose(analytic, finite_difference, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

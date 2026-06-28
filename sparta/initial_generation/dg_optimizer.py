@@ -10,7 +10,6 @@ Two variants:
 
 import numpy as np
 from scipy.optimize import minimize
-from scipy.spatial.distance import cdist
 
 
 def _parse_bounds_matrix(bounds_matrix: np.ndarray, n_atoms: int) -> np.ndarray:
@@ -25,12 +24,9 @@ def _parse_bounds_matrix(bounds_matrix: np.ndarray, n_atoms: int) -> np.ndarray:
             raise ValueError(
                 f"Bounds matrix shape {bm.shape} does not match {n_atoms} atoms."
             )
-        bounds = np.zeros((n_atoms, n_atoms, 2))
-        for i in range(n_atoms):
-            for j in range(n_atoms):
-                if i != j:
-                    bounds[i, j, 0] = min(bm[i, j], bm[j, i])
-                    bounds[i, j, 1] = max(bm[i, j], bm[j, i])
+        bounds = np.empty((n_atoms, n_atoms, 2), dtype=float)
+        bounds[:, :, 0] = np.minimum(bm, bm.T)
+        bounds[:, :, 1] = np.maximum(bm, bm.T)
         return bounds
     elif bm.ndim == 3 and bm.shape[2] == 2:
         if bm.shape[:2] != (n_atoms, n_atoms):
@@ -42,6 +38,58 @@ def _parse_bounds_matrix(bounds_matrix: np.ndarray, n_atoms: int) -> np.ndarray:
         raise ValueError(
             f"Bounds matrix must have shape (n, n) or (n, n, 2), got {bm.shape}."
         )
+
+
+def _prepare_pair_bounds(bounds: np.ndarray):
+    """Extract upper-triangle atom pairs and their lower/upper bounds."""
+    pair_i, pair_j = np.triu_indices(bounds.shape[0], k=1)
+    return pair_i, pair_j, bounds[pair_i, pair_j, 0], bounds[pair_i, pair_j, 1]
+
+
+def _bounds_error_and_gradient(
+    coords: np.ndarray,
+    pair_i: np.ndarray,
+    pair_j: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    weight_lower: float,
+    weight_upper: float,
+):
+    """Return the distance-bounds penalty and Cartesian gradient."""
+    pair_vectors = coords[pair_i] - coords[pair_j]
+    distances = np.sqrt(np.einsum("ij,ij->i", pair_vectors, pair_vectors))
+
+    lower_mask = distances < lower
+    # Preserve the scalar implementation's if/elif behavior for malformed bounds.
+    upper_mask = (~lower_mask) & (distances > upper)
+    lower_error = np.where(lower_mask, lower - distances, 0.0)
+    upper_error = np.where(upper_mask, distances - upper, 0.0)
+    error = (
+        weight_lower * np.dot(lower_error, lower_error)
+        + weight_upper * np.dot(upper_error, upper_error)
+    )
+
+    nonzero = distances > 1e-10
+    safe_distances = np.where(nonzero, distances, 1.0)
+    factors = np.zeros_like(distances)
+    factors[lower_mask & nonzero] = (
+        -2.0
+        * weight_lower
+        * lower_error[lower_mask & nonzero]
+        / safe_distances[lower_mask & nonzero]
+    )
+    factors[upper_mask & nonzero] = (
+        2.0
+        * weight_upper
+        * upper_error[upper_mask & nonzero]
+        / safe_distances[upper_mask & nonzero]
+    )
+
+    contributions = factors[:, None] * pair_vectors
+    gradient = np.zeros_like(coords)
+    np.add.at(gradient, pair_i, contributions)
+    np.add.at(gradient, pair_j, -contributions)
+    return float(error), gradient
 
 
 def optimize_to_bounds_matrix(
@@ -87,47 +135,20 @@ def optimize_to_bounds_matrix(
         raise ValueError("Coordinates must have shape (n_atoms, 3).")
     n_atoms = coords.shape[0]
     bounds = _parse_bounds_matrix(bounds_matrix, n_atoms)
+    pair_data = _prepare_pair_bounds(bounds)
 
-    def objective(x):
+    def objective_and_grad(x):
         cur = x.reshape(n_atoms, 3)
-        dists = cdist(cur, cur)
-        total = 0.0
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                d = dists[i, j]
-                lo, hi = bounds[i, j, 0], bounds[i, j, 1]
-                if d < lo:
-                    total += weight_lower * (lo - d) ** 2
-                elif d > hi:
-                    total += weight_upper * (d - hi) ** 2
+        total, grad = _bounds_error_and_gradient(
+            cur, *pair_data, weight_lower, weight_upper
+        )
         if verbose:
             print(f"Objective: {total:.6f}")
-        return total
-
-    def objective_grad(x):
-        cur = x.reshape(n_atoms, 3)
-        grad = np.zeros_like(cur)
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                vec = cur[j] - cur[i]
-                d = np.linalg.norm(vec)
-                if d < 1e-10:
-                    continue
-                lo, hi = bounds[i, j, 0], bounds[i, j, 1]
-                if d < lo:
-                    factor = -2.0 * weight_lower * (lo - d) / d
-                elif d > hi:
-                    factor = 2.0 * weight_upper * (d - hi) / d
-                else:
-                    continue
-                contribution = factor * (cur[i] - cur[j])
-                grad[i] += contribution
-                grad[j] -= contribution
-        return grad.flatten()
+        return total, grad.flatten()
 
     result = minimize(
-        objective, coords.flatten(), method=method, jac=objective_grad,
-        options={"maxiter": max_iter, "disp": verbose},
+        objective_and_grad, coords.flatten(), method=method, jac=True,
+        options={"maxiter": max_iter},
     )
     if verbose:
         print(f"Optimization {'converged' if result.success else 'did not converge'}")
@@ -186,54 +207,16 @@ def optimize_to_bounds_matrix_and_rmsd(
         raise ValueError("reference_coords must have the same shape as coords.")
     n_atoms = coords.shape[0]
     bounds = _parse_bounds_matrix(bounds_matrix, n_atoms)
+    pair_data = _prepare_pair_bounds(bounds)
 
-    def objective(x):
+    def objective_and_grad(x):
         cur = x.reshape(n_atoms, 3)
-        dists = cdist(cur, cur)
-        bounds_err = 0.0
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                d = dists[i, j]
-                lo, hi = bounds[i, j, 0], bounds[i, j, 1]
-                if d < lo:
-                    bounds_err += weight_lower * (lo - d) ** 2
-                elif d > hi:
-                    bounds_err += weight_upper * (d - hi) ** 2
+        bounds_err, grad = _bounds_error_and_gradient(
+            cur, *pair_data, weight_lower, weight_upper
+        )
         rmsd_err = weight_rmsd * np.sum((cur - reference_coords) ** 2)
-        chiral_err = 0.0
-        if chiral_constraints:
-            for (c, i, j, k, s, m) in chiral_constraints:
-                vol = float((cur[i] - cur[c]) @ np.cross(cur[j] - cur[c], cur[k] - cur[c]))
-                viol = m - s * vol
-                if viol > 0.0:
-                    chiral_err += weight_chiral * viol * viol
-        total = bounds_err + rmsd_err + chiral_err
-        if verbose:
-            print(f"Objective: {total:.6f} (bounds: {bounds_err:.6f}, "
-                  f"rmsd: {rmsd_err:.6f}, chiral: {chiral_err:.6f})")
-        return total
-
-    def objective_grad(x):
-        cur = x.reshape(n_atoms, 3)
-        grad = np.zeros_like(cur)
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                vec = cur[j] - cur[i]
-                d = np.linalg.norm(vec)
-                if d < 1e-10:
-                    continue
-                lo, hi = bounds[i, j, 0], bounds[i, j, 1]
-                if d < lo:
-                    factor = -2.0 * weight_lower * (lo - d) / d
-                elif d > hi:
-                    factor = 2.0 * weight_upper * (d - hi) / d
-                else:
-                    factor = None
-                if factor is not None:
-                    contribution = factor * (cur[i] - cur[j])
-                    grad[i] += contribution
-                    grad[j] -= contribution
         grad += 2.0 * weight_rmsd * (cur - reference_coords)
+        chiral_err = 0.0
         if chiral_constraints:
             for (c, i, j, k, s, m) in chiral_constraints:
                 a = cur[i] - cur[c]
@@ -242,6 +225,7 @@ def optimize_to_bounds_matrix_and_rmsd(
                 vol = float(a @ np.cross(b, e))
                 viol = m - s * vol
                 if viol > 0.0:
+                    chiral_err += weight_chiral * viol * viol
                     # d(penalty)/dV = -2 w viol s; dV/dr via vector-triple-product
                     g = -2.0 * weight_chiral * viol * s
                     gi = np.cross(b, e)   # dV/dr_i
@@ -251,11 +235,15 @@ def optimize_to_bounds_matrix_and_rmsd(
                     grad[j] += g * gj
                     grad[k] += g * gk
                     grad[c] -= g * (gi + gj + gk)   # V is translation-invariant
-        return grad.flatten()
+        total = bounds_err + rmsd_err + chiral_err
+        if verbose:
+            print(f"Objective: {total:.6f} (bounds: {bounds_err:.6f}, "
+                  f"rmsd: {rmsd_err:.6f}, chiral: {chiral_err:.6f})")
+        return total, grad.flatten()
 
     result = minimize(
-        objective, coords.flatten(), method=method, jac=objective_grad,
-        options={"maxiter": max_iter, "disp": verbose},
+        objective_and_grad, coords.flatten(), method=method, jac=True,
+        options={"maxiter": max_iter},
     )
     if verbose:
         print(f"Optimization {'converged' if result.success else 'did not converge'}")

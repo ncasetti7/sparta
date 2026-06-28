@@ -61,6 +61,14 @@ class IDPP(Calculator):
             raise ValueError(f"alpha must be in [0, 1], got {self.alpha}.")
 
         self.target_distances = self._compute_target_distances()
+        self._pair_i, self._pair_j = np.triu_indices(n_atoms, k=1)
+        self._weights = np.zeros_like(self.target_distances)
+        valid_targets = self.target_distances > 1e-10
+        self._weights[valid_targets] = (
+            1.0 / self.target_distances[valid_targets] ** self.d_power
+        )
+        self._pair_targets = self.target_distances[self._pair_i, self._pair_j]
+        self._pair_weights = self._weights[self._pair_i, self._pair_j]
 
     def _compute_target_distances(self) -> np.ndarray:
         """Linearly interpolate pairwise distances between initial and final images."""
@@ -70,14 +78,20 @@ class IDPP(Calculator):
         d_final = np.sqrt((diff_f * diff_f).sum(axis=-1))
         return (1.0 - self.alpha) * d_initial + self.alpha * d_final
 
+    def check_state(self, atoms, tol=1e-15):
+        """Invalidate cached IDPP values only when Cartesian positions change."""
+        if self.atoms is None or self.atoms.positions.shape != atoms.positions.shape:
+            return ["positions"]
+        if np.array_equal(self.atoms.positions, atoms.positions):
+            return []
+        return ["positions"]
+
     def calculate(self, atoms=None, properties=("energy",), system_changes=all_changes):
         if atoms is not None:
             self.atoms = atoms
         Calculator.calculate(self, atoms, properties, system_changes)
 
         positions = self.atoms.get_positions()
-        n_atoms = len(positions)
-
         # Vectorized pairwise distance matrix: diff[i,j] = pos[i] - pos[j]
         diff = positions[:, None, :] - positions[None, :, :]   # (n, n, 3)
         current_distances = np.sqrt((diff * diff).sum(axis=-1))  # (n, n)
@@ -85,24 +99,18 @@ class IDPP(Calculator):
         d_t = self.target_distances  # (n, n)
 
         # Energy over upper triangle (i < j)
-        i_idx, j_idx = np.triu_indices(n_atoms, k=1)
-        d_ij = current_distances[i_idx, j_idx]
-        d_t_vals = d_t[i_idx, j_idx]
-
-        valid = d_t_vals > 1e-10
-        safe_dt = np.where(valid, d_t_vals, 1.0)
-        w = np.where(valid, 1.0 / (safe_dt ** self.d_power), 0.0)
-
-        self.results["energy"] = float(np.sum(w * (d_ij - d_t_vals) ** 2))
+        d_ij = current_distances[self._pair_i, self._pair_j]
+        self.results["energy"] = float(
+            np.sum(self._pair_weights * (d_ij - self._pair_targets) ** 2)
+        )
 
         if "forces" in properties:
             # scale[i,j] = -2 * w[i,j] * (d[i,j] - d_t[i,j]) / d[i,j]
             # forces[i] = sum_j scale[i,j] * diff[i,j]  where diff[i,j] = pos[i] - pos[j]
             valid_both = (d_t > 1e-10) & (current_distances > 1e-10)  # (n, n)
             safe_d = np.where(valid_both, current_distances, 1.0)
-            safe_dt_full = np.where(valid_both, d_t, 1.0)
-            w_full = np.where(valid_both, 1.0 / (safe_dt_full ** self.d_power), 0.0)
-            scale = -2.0 * w_full * (current_distances - d_t) / safe_d  # (n, n)
+            weights = np.where(valid_both, self._weights, 0.0)
+            scale = -2.0 * weights * (current_distances - d_t) / safe_d  # (n, n)
             self.results["forces"] = np.einsum("ij,ijk->ik", scale, diff)  # (n, 3)
 
 
