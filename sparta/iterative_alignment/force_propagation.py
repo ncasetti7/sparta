@@ -15,6 +15,8 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import rdMolTransforms
 
+from sparta.initial_generation.dg_optimizer import accumulate_pair_contributions
+
 
 def _pairwise_distances(pos: np.ndarray) -> np.ndarray:
     """Compute symmetric (n, n) pairwise distance matrix from (n, 3) positions."""
@@ -212,14 +214,12 @@ def compute_endpoint_gradient_total(
         mag_i = np.where(valid & valid_i,
                          2.0 * w * err * (1.0 - alpha) / safe_di, 0.0)
         contrib_i = mag_i[:, None] * diff_initial
-        np.add.at(init_force, i_idx, contrib_i)
-        np.add.at(init_force, j_idx, -contrib_i)
+        init_force += accumulate_pair_contributions(contrib_i, i_idx, j_idx, n_atoms)
 
         mag_f = np.where(valid & valid_f,
                          2.0 * w * err * alpha / safe_df, 0.0)
         contrib_f = mag_f[:, None] * diff_final
-        np.add.at(final_force, i_idx, contrib_f)
-        np.add.at(final_force, j_idx, -contrib_f)
+        final_force += accumulate_pair_contributions(contrib_f, i_idx, j_idx, n_atoms)
 
     max_f = max(
         np.linalg.norm(init_force, axis=1).max(),
@@ -310,24 +310,19 @@ def compute_endpoint_gradient_barrier(
     w = np.where(valid, 1.0 / (safe_dt ** d_power), 0.0)
     err = d_c_vals - d_t_vals
 
-    init_force = np.zeros((n_atoms, 3))
-    final_force = np.zeros((n_atoms, 3))
-
     valid_i = valid & (d_i_vals > 1e-10)
     safe_di = np.where(d_i_vals > 1e-10, d_i_vals, 1.0)
     mag_i = np.where(valid_i, 2.0 * w * err * (1.0 - alpha) / safe_di, 0.0)
     diff_initial = initial_pos[i_idx] - initial_pos[j_idx]
     contrib_i = mag_i[:, None] * diff_initial
-    np.add.at(init_force, i_idx, contrib_i)
-    np.add.at(init_force, j_idx, -contrib_i)
+    init_force = accumulate_pair_contributions(contrib_i, i_idx, j_idx, n_atoms)
 
     valid_f = valid & (d_f_vals > 1e-10)
     safe_df = np.where(d_f_vals > 1e-10, d_f_vals, 1.0)
     mag_f = np.where(valid_f, 2.0 * w * err * alpha / safe_df, 0.0)
     diff_final = final_pos[i_idx] - final_pos[j_idx]
     contrib_f = mag_f[:, None] * diff_final
-    np.add.at(final_force, i_idx, contrib_f)
-    np.add.at(final_force, j_idx, -contrib_f)
+    final_force = accumulate_pair_contributions(contrib_f, i_idx, j_idx, n_atoms)
 
     max_f = max(
         np.linalg.norm(init_force, axis=1).max(),
@@ -406,10 +401,7 @@ def apply_endpoint_adjustment(
         #   upper viol → toward j     (+corr_upper * unit)
         delta_i = (corr_upper - corr_lower)[:, None] * unit  # (n_pairs, 3)
 
-        displacement = np.zeros_like(new_pos)
-        np.add.at(displacement, i_idx, delta_i)
-        np.add.at(displacement, j_idx, -delta_i)
-        new_pos += displacement
+        new_pos += accumulate_pair_contributions(delta_i, i_idx, j_idx, n_atoms)
 
     # Hard cap: total displacement from original ≤ max_displacement
     total_disp = new_pos - orig

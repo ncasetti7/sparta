@@ -14,6 +14,12 @@ import numpy as np
 from ase.calculators.calculator import Calculator, all_changes
 
 
+def _pairwise_distance_matrix(positions: np.ndarray) -> np.ndarray:
+    """Return the full (n, n) Euclidean pairwise distance matrix."""
+    diff = positions[:, None, :] - positions[None, :, :]
+    return np.sqrt((diff * diff).sum(axis=-1))
+
+
 class IDPP(Calculator):
     """
     IDPP calculator for a single NEB image.
@@ -34,6 +40,12 @@ class IDPP(Calculator):
         image k uses alpha = k / (n_images - 1).
     d_power : int
         Distance weighting exponent (default: 4).
+    d_initial, d_final : np.ndarray, optional
+        Precomputed pairwise distance matrices for the initial and final images.
+        When several calculators share the same endpoints (e.g. every image of a
+        single NEB), passing these avoids recomputing the identical endpoint
+        distance matrices once per image. When omitted they are computed from
+        ``initial_positions`` / ``final_positions``, giving identical results.
     """
 
     implemented_properties = ["energy", "forces"]
@@ -44,6 +56,8 @@ class IDPP(Calculator):
         final_positions: np.ndarray,
         alpha: float,
         d_power: int = 4,
+        d_initial: np.ndarray = None,
+        d_final: np.ndarray = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -60,7 +74,7 @@ class IDPP(Calculator):
         if not 0.0 <= self.alpha <= 1.0:
             raise ValueError(f"alpha must be in [0, 1], got {self.alpha}.")
 
-        self.target_distances = self._compute_target_distances()
+        self.target_distances = self._compute_target_distances(d_initial, d_final)
         self._pair_i, self._pair_j = np.triu_indices(n_atoms, k=1)
         self._weights = np.zeros_like(self.target_distances)
         valid_targets = self.target_distances > 1e-10
@@ -70,12 +84,22 @@ class IDPP(Calculator):
         self._pair_targets = self.target_distances[self._pair_i, self._pair_j]
         self._pair_weights = self._weights[self._pair_i, self._pair_j]
 
-    def _compute_target_distances(self) -> np.ndarray:
-        """Linearly interpolate pairwise distances between initial and final images."""
-        diff_i = self.initial_positions[:, None, :] - self.initial_positions[None, :, :]
-        d_initial = np.sqrt((diff_i * diff_i).sum(axis=-1))
-        diff_f = self.final_positions[:, None, :] - self.final_positions[None, :, :]
-        d_final = np.sqrt((diff_f * diff_f).sum(axis=-1))
+    def _compute_target_distances(
+        self,
+        d_initial: np.ndarray = None,
+        d_final: np.ndarray = None,
+    ) -> np.ndarray:
+        """Linearly interpolate pairwise distances between initial and final images.
+
+        ``d_initial`` / ``d_final`` may be supplied when the endpoint distance
+        matrices have already been computed (they are identical across all images
+        of a NEB); otherwise they are derived from the stored positions, which
+        yields the same arrays.
+        """
+        if d_initial is None:
+            d_initial = _pairwise_distance_matrix(self.initial_positions)
+        if d_final is None:
+            d_final = _pairwise_distance_matrix(self.final_positions)
         return (1.0 - self.alpha) * d_initial + self.alpha * d_final
 
     def check_state(self, atoms, tol=1e-15):
@@ -143,7 +167,18 @@ def create_idpp_calculators(
         raise ValueError(f"n_images must be at least 3, got {n_images}.")
     initial_pos = initial_atoms.get_positions()
     final_pos = final_atoms.get_positions()
+    # The endpoint distance matrices are identical for every image, so compute
+    # them once here instead of once per IDPP.__init__.
+    d_initial = _pairwise_distance_matrix(initial_pos)
+    d_final = _pairwise_distance_matrix(final_pos)
     return [
-        IDPP(initial_pos, final_pos, alpha=i / (n_images - 1), d_power=d_power)
+        IDPP(
+            initial_pos,
+            final_pos,
+            alpha=i / (n_images - 1),
+            d_power=d_power,
+            d_initial=d_initial,
+            d_final=d_final,
+        )
         for i in range(1, n_images - 1)
     ]

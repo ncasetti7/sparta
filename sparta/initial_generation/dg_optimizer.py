@@ -46,6 +46,27 @@ def _prepare_pair_bounds(bounds: np.ndarray):
     return pair_i, pair_j, bounds[pair_i, pair_j, 0], bounds[pair_i, pair_j, 1]
 
 
+def accumulate_pair_contributions(
+    contributions: np.ndarray,
+    pair_i: np.ndarray,
+    pair_j: np.ndarray,
+    n_atoms: int,
+) -> np.ndarray:
+    """Scatter ``+contributions`` onto ``pair_i`` and ``-contributions`` onto
+    ``pair_j``, returning the per-atom sum of shape ``(n_atoms, 3)``.
+
+    Equivalent to two ``np.add.at`` calls but markedly faster (column-wise
+    ``np.bincount``). The summation reassociates, so values match the unbuffered
+    ``np.add.at`` scatter only to floating-point rounding (~1e-14).
+    """
+    result = np.empty((n_atoms, contributions.shape[1]), dtype=float)
+    for axis in range(contributions.shape[1]):
+        result[:, axis] = np.bincount(
+            pair_i, contributions[:, axis], minlength=n_atoms
+        ) - np.bincount(pair_j, contributions[:, axis], minlength=n_atoms)
+    return result
+
+
 def _bounds_error_and_gradient(
     coords: np.ndarray,
     pair_i: np.ndarray,
@@ -86,9 +107,9 @@ def _bounds_error_and_gradient(
     )
 
     contributions = factors[:, None] * pair_vectors
-    gradient = np.zeros_like(coords)
-    np.add.at(gradient, pair_i, contributions)
-    np.add.at(gradient, pair_j, -contributions)
+    gradient = accumulate_pair_contributions(
+        contributions, pair_i, pair_j, coords.shape[0]
+    )
     return float(error), gradient
 
 
