@@ -9,13 +9,19 @@ from sparta.stereochemistry import (
     alkene_stereo_matches,
     alkene_stereo_references,
     atropisomer_stereo_matches,
+    atropisomer_stereo_mismatches,
     atropisomer_stereo_references,
     correct_alkene_stereochemistry,
+    correct_atropisomer_stereochemistry,
     correct_tetrahedral_stereochemistry,
     reflect_atoms_across_plane,
     rotate_atoms_around_axis,
     stereo_matches,
     tetrahedral_stereo_references,
+)
+from sparta.stereochemistry.constraints import (
+    _movable_atropisomer_substituent,
+    atropisomer_axis_value,
 )
 
 
@@ -119,6 +125,28 @@ class TestTetrahedralStereoReferences:
 
         corrected = correct_tetrahedral_stereochemistry(wrong, mol, refs)
         assert stereo_matches(corrected, refs)
+
+    def test_movable_branch_never_carries_another_stereocenter(self):
+        """Reflection is improper, so the tetrahedral corrector must not select a
+        branch containing a second stereocenter (which it would invert)."""
+        from sparta.stereochemistry.constraints import (
+            _movable_substituent,
+            _branch_has_internal_stereo,
+        )
+
+        smi = (
+            "[C:1]([H:5])([H:6])([H:7])[C@:2]([Br:3])([H:8])"
+            "[C@:9]([Br:10])([H:11])[C:12]([H:13])([H:14])[H:15]"
+        )
+        mol = cheminformatics.make_mol(smi)
+        mol = cheminformatics.generate_conformer(mol, smi, seed=0)
+        refs = tetrahedral_stereo_references(mol)
+
+        for ref in refs:
+            movable = _movable_substituent(mol, ref)
+            if movable is not None:
+                _, branch = movable
+                assert not _branch_has_internal_stereo(mol, branch)
 
 
 class TestAlkeneStereoReferences:
@@ -242,6 +270,93 @@ class TestAtropisomerStereoReferences:
         wrong = rotate_atoms_around_axis(coords, [ref.descriptor_atoms[0]], ref.axis, np.pi)
 
         assert not atropisomer_stereo_matches(wrong, refs)
+
+
+class TestAtropisomerCorrection:
+    def test_reflection_lands_on_mirror_and_preserves_branch_geometry(self):
+        """The reflection operator flips the axial sign while keeping the moved
+        branch rigid (an isometry) — the minimal-strain route to the mirror
+        isomer, unlike the pi rotation which lands on a different rotamer."""
+        mol = _atropisomer_mol()
+        ref = atropisomer_stereo_references(mol)[0]
+        coords = mol.GetConformer().GetPositions()
+        branch, plane = _movable_atropisomer_substituent(mol, ref)
+
+        a, b = ref.axis
+        i, j = ref.descriptor_atoms
+        before = atropisomer_axis_value(coords, a, b, i, j)
+        reflected = reflect_atoms_across_plane(coords, branch, plane)
+        after = atropisomer_axis_value(reflected, a, b, i, j)
+
+        # descriptor sign flips, magnitude preserved (theta -> -theta)
+        assert np.sign(before) != np.sign(after)
+        assert abs(abs(after) - abs(before)) < 1e-6
+
+        # branch internal geometry is untouched by the reflection
+        bl = sorted(branch)
+        d0 = np.linalg.norm(coords[bl][:, None] - coords[bl][None, :], axis=-1)
+        d1 = np.linalg.norm(reflected[bl][:, None] - reflected[bl][None, :], axis=-1)
+        assert np.abs(d0 - d1).max() < 1e-8
+
+    def test_correction_restores_wrong_atropisomer(self):
+        mol = _atropisomer_mol()
+        refs = atropisomer_stereo_references(mol)
+        ref = refs[0]
+        coords = mol.GetConformer().GetPositions()
+
+        branch, _ = _movable_atropisomer_substituent(mol, ref)
+        wrong = rotate_atoms_around_axis(coords, branch, ref.axis, np.pi)
+        assert not atropisomer_stereo_matches(wrong, refs)
+
+        corrected = correct_atropisomer_stereochemistry(wrong, mol, refs)
+        assert atropisomer_stereo_matches(corrected, refs)
+
+    def test_correction_preserves_a_tetrahedral_center_in_the_moved_branch(self):
+        """When the moved branch carries its own stereocenter, the corrector must
+        use the proper (pi-rotation) operator so that center is not inverted."""
+        # biaryl-style axis (ring C4-C5 to a chiral carbon) with a tetrahedral
+        # center living on the branch that would be moved.
+        smi = (
+            "[C:1]1([H:9])[C:2]([H:10])=[C:3]([H:11])[C:4]([H:12])"
+            "=[C:5]1[C@:6]([F:7])([Cl:8])[Br:13]"
+        )
+        mol = cheminformatics.make_mol(smi)
+        mol = cheminformatics.generate_conformer(mol, smi, seed=0)
+        tet_refs = tetrahedral_stereo_references(mol)
+        coords = mol.GetConformer().GetPositions()
+
+        # reflecting the {stereocenter + substituents} branch would invert it;
+        # a pi rotation about the axis preserves it.
+        branch = [5, 6, 7, 12]
+        rotated = rotate_atoms_around_axis(coords, branch, (4, 5), np.pi)
+        assert stereo_matches(rotated, tet_refs)
+
+    def test_product_generation_repairs_product_atropisomer(self):
+        """A reaction whose product is the opposite atropisomer: the pushforward
+        must flip the axis and the corrector must recover it, instead of the
+        pairs being rejected."""
+        reactant = _atropisomer_smiles(Chem.BondStereo.STEREOATROPCW)
+        product = _atropisomer_smiles(Chem.BondStereo.STEREOATROPCCW)
+
+        rxn = Reaction(
+            reactant_smiles=reactant,
+            product_smiles=product,
+            n_conformers=4,
+            n_seeds=1,
+            n_images=3,
+            top_k=4,
+        ).generate_initial_conformers()
+
+        assert rxn.top_k_conformers
+        assert rxn.reactant_atropisomer_refs[0].sign != rxn.product_atropisomer_refs[0].sign
+        assert all(
+            atropisomer_stereo_matches(c["product_coords"], rxn.product_atropisomer_refs)
+            for c in rxn.top_k_conformers
+        )
+        assert all(
+            atropisomer_stereo_matches(c["reactant_coords"], rxn.reactant_atropisomer_refs)
+            for c in rxn.top_k_conformers
+        )
 
 
 class TestStereoDebug:

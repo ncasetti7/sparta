@@ -25,6 +25,7 @@ from sparta.stereochemistry import (
     atropisomer_stereo_matches,
     chiral_constraints_from_references,
     correct_alkene_stereochemistry,
+    correct_atropisomer_stereochemistry,
     correct_tetrahedral_stereochemistry,
     log_alkene_state,
     log_atropisomer_state,
@@ -246,6 +247,18 @@ def _generate_reaction_conformers_single(
                 transformed_coords,
                 product_alkene_refs,
             )
+        if not atropisomer_stereo_matches(transformed_coords, product_atropisomer_refs):
+            transformed_coords = correct_atropisomer_stereochemistry(
+                transformed_coords,
+                product_mol,
+                product_atropisomer_refs,
+            )
+            log_atropisomer_state(
+                reaction,
+                f"product pushforward atropisomer-corrected conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                transformed_coords,
+                product_atropisomer_refs,
+            )
         final_product_coords = optimize_to_bounds_matrix_and_rmsd(
             transformed_coords,
             product_bm,
@@ -277,6 +290,7 @@ def _generate_reaction_conformers_single(
         if (
             not stereo_matches(final_product_coords, product_stereo_refs)
             or not alkene_stereo_matches(final_product_coords, product_alkene_refs)
+            or not atropisomer_stereo_matches(final_product_coords, product_atropisomer_refs)
         ):
             corrected_coords = correct_tetrahedral_stereochemistry(
                 final_product_coords,
@@ -287,6 +301,11 @@ def _generate_reaction_conformers_single(
                 corrected_coords,
                 product_mol,
                 product_alkene_refs,
+            )
+            corrected_coords = correct_atropisomer_stereochemistry(
+                corrected_coords,
+                product_mol,
+                product_atropisomer_refs,
             )
             log_stereo_state(
                 reaction,

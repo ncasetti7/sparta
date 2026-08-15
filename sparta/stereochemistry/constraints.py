@@ -600,7 +600,16 @@ def _movable_substituent(
     mol: Chem.Mol,
     ref: TetrahedralStereoReference,
 ) -> Tuple[int, set[int]] | None:
-    """Choose a substituent side that can be reflected without crossing a ring."""
+    """
+    Choose a substituent side that can be reflected without crossing a ring.
+
+    A tetrahedral flip needs an improper (reflection) operation, which would
+    invert any *other* stereocenter living inside the reflected branch. Branches
+    that carry their own defined stereochemistry are therefore rejected, so a
+    neighbouring center is never collateral damage; if that leaves no clean
+    branch, the corrector declines and the optimizer's per-center chiral-volume
+    penalty (which acts only on this center) is left to enforce the sign.
+    """
     all_neighbors = set(ref.priority_neighbors)
     candidates = []
     for neighbor in ref.neighbors:
@@ -608,6 +617,8 @@ def _movable_substituent(
         if not branch:
             continue
         if branch & (all_neighbors - {neighbor}):
+            continue
+        if _branch_has_internal_stereo(mol, branch):
             continue
         candidates.append((neighbor, branch))
     if not candidates:
@@ -698,6 +709,111 @@ def correct_alkene_stereochemistry(
                 continue
             _, branch = movable
             fixed = rotate_atoms_around_axis(fixed, branch, ref.bond, np.pi)
+            changed = True
+        if not changed:
+            break
+    return fixed
+
+
+def _branch_has_internal_stereo(mol: Chem.Mol, branch: set[int]) -> bool:
+    """
+    True if ``branch`` carries a defined *chiral* stereo element of its own — a
+    tetrahedral center or an atropisomeric axis. Reflection (an improper
+    operation) inverts those, so a corrector that reflects such a branch would
+    silently corrupt them and must rotate instead / decline. E/Z double bonds are
+    deliberately excluded: reflection preserves cis/trans, so an alkene inside the
+    branch is not a reason to avoid reflecting it.
+    """
+    for idx in branch:
+        if mol.GetAtomWithIdx(idx).GetChiralTag() != Chem.ChiralType.CHI_UNSPECIFIED:
+            return True
+    reflection_sensitive = (
+        Chem.BondStereo.STEREOATROPCW,
+        Chem.BondStereo.STEREOATROPCCW,
+    )
+    for bond in mol.GetBonds():
+        if (
+            bond.GetBeginAtomIdx() in branch
+            and bond.GetEndAtomIdx() in branch
+            and bond.GetStereo() in reflection_sensitive
+        ):
+            return True
+    return False
+
+
+def _movable_atropisomer_substituent(
+    mol: Chem.Mol,
+    ref: AtropisomerStereoReference,
+) -> Tuple[set[int], Tuple[int, int, int]] | None:
+    """
+    Choose a clean branch on one side of the axis to move, plus the three atoms
+    defining the reflection plane that inverts the axial sign.
+
+    The axis is ``a-b``; ``i``/``j`` are the controlling atoms bonded to ``a``/``b``.
+    Reflecting the ``b``-side branch across plane ``(i, a, b)`` sends the signed
+    dihedral ``i-a-b-j`` to its negative (the true mirror-image atropisomer),
+    and symmetrically for the ``a``-side branch across ``(j, b, a)``. The two
+    axis atoms lie in either plane, so they never move. Branches that loop back
+    across the axis (a fused/bridged system) are rejected, mirroring the
+    conservative stance of the tetrahedral and alkene correctors.
+    """
+    a, b = ref.axis
+    i, j = ref.descriptor_atoms
+    candidates = []
+    # (branch-root neighbour, opposite axis atom, blocked atom, plane points)
+    for root, other_axis, blocked, plane in (
+        (b, a, i, (i, a, b)),
+        (a, b, j, (j, b, a)),
+    ):
+        branch = _substituent_atoms(mol, other_axis, root)
+        if not branch or blocked in branch or other_axis in branch:
+            continue
+        candidates.append((branch, plane))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: len(item[0]))
+
+
+def correct_atropisomer_stereochemistry(
+    coords: np.ndarray,
+    mol: Chem.Mol,
+    references: Sequence[AtropisomerStereoReference],
+    max_passes: int = 4,
+) -> np.ndarray:
+    """
+    Flip mis-set atropisomeric axes onto their reference sign, in place on a
+    copy of ``coords``.
+
+    For each mismatched axis the corrector moves the smaller clean branch on one
+    side of the axis. It **reflects** that branch across the plane through the
+    axis and the opposite side's controlling atom, which lands the branch on the
+    true mirror-image geometry (dihedral ``theta -> -theta``): an isometry that
+    preserves the branch's internal geometry and matches the intended-isomer
+    reference/bounds, so it introduces no new strain on the pushforward. When the
+    branch carries its own defined stereochemistry, reflection would invert it, so
+    the corrector falls back to a ``pi`` rotation about the axis (a proper
+    operation: ``sin(theta + pi) = -sin(theta)`` flips the axial sign while
+    preserving every internal center, at the cost of landing on a different
+    rotamer that the subsequent relaxation must resolve).
+
+    Axes whose branches are tied together through a ring are left for
+    validation/rejection.
+    """
+    fixed = np.asarray(coords, dtype=float).copy()
+    for _ in range(max_passes):
+        mismatches = atropisomer_stereo_mismatches(fixed, references)
+        if not mismatches:
+            break
+        changed = False
+        for ref in mismatches:
+            movable = _movable_atropisomer_substituent(mol, ref)
+            if movable is None:
+                continue
+            branch, plane = movable
+            if _branch_has_internal_stereo(mol, branch):
+                fixed = rotate_atoms_around_axis(fixed, branch, ref.axis, np.pi)
+            else:
+                fixed = reflect_atoms_across_plane(fixed, branch, plane)
             changed = True
         if not changed:
             break
