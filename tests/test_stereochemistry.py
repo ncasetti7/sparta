@@ -14,6 +14,7 @@ from sparta.stereochemistry import (
     correct_alkene_stereochemistry,
     correct_atropisomer_stereochemistry,
     correct_tetrahedral_stereochemistry,
+    intermolecular_stereo_references,
     reflect_atoms_across_plane,
     rotate_atoms_around_axis,
     stereo_matches,
@@ -55,6 +56,19 @@ def _atropisomer_mol(stereo=Chem.BondStereo.STEREOATROPCW):
     smiles = _atropisomer_smiles(stereo)
     mol = cheminformatics.make_mol(smiles)
     return cheminformatics.generate_conformer(mol, smiles, seed=0)
+
+
+def _reaction_intermolecular_refs(rxn):
+    return intermolecular_stereo_references(
+        rxn.reactant_mol,
+        rxn.product_mol,
+        rxn.reactant_stereo_refs,
+        rxn.product_stereo_refs,
+        rxn.reactant_alkene_refs,
+        rxn.product_alkene_refs,
+        rxn.reactant_atropisomer_refs,
+        rxn.product_atropisomer_refs,
+    )
 
 
 class TestTetrahedralStereoReferences:
@@ -357,6 +371,119 @@ class TestAtropisomerCorrection:
             atropisomer_stereo_matches(c["reactant_coords"], rxn.reactant_atropisomer_refs)
             for c in rxn.top_k_conformers
         )
+
+
+class TestIntermolecularStereoPlacement:
+    def test_new_interfragment_tetrahedral_center_moves_reactant_fragment(
+        self, capsys
+    ):
+        reactant = "[C:1]([F:2])([Cl:3])[H:4].[Br:5]"
+        product = "[C@@:1]([F:2])([Cl:3])([H:4])[Br:5]"
+        rxn = Reaction(
+            reactant_smiles=reactant,
+            product_smiles=product,
+            n_conformers=1,
+            n_seeds=1,
+            n_images=3,
+            top_k=1,
+            stereo_debug=True,
+        )
+
+        refs = _reaction_intermolecular_refs(rxn)
+        assert refs.tetrahedral == tuple(rxn.product_stereo_refs)
+
+        rxn.generate_initial_conformers()
+
+        out = capsys.readouterr().out
+        assert "product interfragment-repositioned" in out
+        assert "product pushforward corrected" not in out
+        assert stereo_matches(
+            rxn.top_k_conformers[0]["product_coords"], rxn.product_stereo_refs
+        )
+
+    def test_new_interfragment_ez_rotates_reactant_fragment(self, capsys):
+        # The alkene axis already belongs to one fragment; the incoming chloride
+        # is the separate fragment whose attachment first defines E/Z.
+        reactant = "[F:1][C:2]([H:6])=[C:3][H:5].[Cl:4]"
+        product = "[F:1]/[C:2]([H:6])=[C:3](\\[Cl:4])[H:5]"
+        rxn = Reaction(
+            reactant_smiles=reactant,
+            product_smiles=product,
+            n_conformers=1,
+            n_seeds=1,
+            n_images=3,
+            top_k=1,
+            stereo_debug=True,
+        )
+
+        refs = _reaction_intermolecular_refs(rxn)
+        assert refs.alkene == tuple(rxn.product_alkene_refs)
+
+        rxn.generate_initial_conformers()
+
+        out = capsys.readouterr().out
+        assert "product interfragment-repositioned" in out
+        assert "product pushforward alkene-corrected" not in out
+        assert alkene_stereo_matches(
+            rxn.top_k_conformers[0]["product_coords"], rxn.product_alkene_refs
+        )
+
+    def test_new_interfragment_atropisomer_rotates_reactant_fragment(self, capsys):
+        product = _atropisomer_smiles(Chem.BondStereo.STEREOATROPCW)
+        product_mol = cheminformatics.make_mol(product)
+        axis = next(
+            bond
+            for bond in product_mol.GetBonds()
+            if bond.GetStereo()
+            in (Chem.BondStereo.STEREOATROPCW, Chem.BondStereo.STEREOATROPCCW)
+        )
+        split = Chem.RWMol(product_mol)
+        split.RemoveBond(axis.GetBeginAtomIdx(), axis.GetEndAtomIdx())
+        reactant = Chem.MolToCXSmiles(split.GetMol())
+        rxn = Reaction(
+            reactant_smiles=reactant,
+            product_smiles=product,
+            n_conformers=1,
+            n_seeds=1,
+            n_images=3,
+            top_k=1,
+            stereo_debug=True,
+        )
+
+        refs = _reaction_intermolecular_refs(rxn)
+        assert refs.atropisomer == tuple(rxn.product_atropisomer_refs)
+
+        rxn.generate_initial_conformers()
+
+        out = capsys.readouterr().out
+        assert "product interfragment-repositioned" in out
+        assert "product pushforward atropisomer-corrected" not in out
+        assert atropisomer_stereo_matches(
+            rxn.top_k_conformers[0]["product_coords"],
+            rxn.product_atropisomer_refs,
+        )
+
+    def test_intramolecular_new_center_keeps_legacy_correction(self, capsys):
+        reactant = "[C:1]([F:2])([Cl:3])[C:4]([Br:5])([H:6])[H:7]"
+        product = "[C@@:1]([F:2])([Cl:3])([C:4]([H:6])[H:7])[Br:5]"
+        rxn = Reaction(
+            reactant_smiles=reactant,
+            product_smiles=product,
+            n_conformers=1,
+            n_seeds=1,
+            n_images=3,
+            top_k=1,
+            stereo_debug=True,
+        )
+
+        refs = _reaction_intermolecular_refs(rxn)
+        assert not refs
+
+        rxn.generate_initial_conformers()
+
+        out = capsys.readouterr().out
+        assert "product interfragment-repositioned" not in out
+        assert "product pushforward corrected" in out
 
 
 class TestStereoDebug:

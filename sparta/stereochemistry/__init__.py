@@ -35,11 +35,17 @@ from sparta.stereochemistry.constraints import (
     tetrahedral_chiral_constraints,
     tetrahedral_stereo_references,
 )
+from sparta.stereochemistry.placement import (
+    IntermolecularStereoReferences,
+    intermolecular_stereo_references,
+    reposition_intermolecular_stereochemistry,
+)
 
 __all__ = [
     "AlkeneStereoReference",
     "AtropisomerStereoReference",
     "TetrahedralStereoReference",
+    "IntermolecularStereoReferences",
     "alkene_side_value",
     "alkene_stereo_flipped",
     "alkene_stereo_matches",
@@ -70,4 +76,6 @@ __all__ = [
     "stereocenter_targets",
     "tetrahedral_chiral_constraints",
     "tetrahedral_stereo_references",
+    "intermolecular_stereo_references",
+    "reposition_intermolecular_stereochemistry",
 ]

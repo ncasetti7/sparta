@@ -27,9 +27,11 @@ from sparta.stereochemistry import (
     correct_alkene_stereochemistry,
     correct_atropisomer_stereochemistry,
     correct_tetrahedral_stereochemistry,
+    intermolecular_stereo_references,
     log_alkene_state,
     log_atropisomer_state,
     log_stereo_state,
+    reposition_intermolecular_stereochemistry,
     stereo_matches,
 )
 
@@ -162,6 +164,32 @@ def _generate_reaction_conformers_single(
     product_stereo_refs = reaction.product_stereo_refs
     product_alkene_refs = reaction.product_alkene_refs
     product_atropisomer_refs = reaction.product_atropisomer_refs
+    intermolecular_refs = intermolecular_stereo_references(
+        reactant_mol,
+        product_mol,
+        reaction.reactant_stereo_refs,
+        product_stereo_refs,
+        reaction.reactant_alkene_refs,
+        product_alkene_refs,
+        reaction.reactant_atropisomer_refs,
+        product_atropisomer_refs,
+    )
+    intermolecular_tetrahedral = set(intermolecular_refs.tetrahedral)
+    intermolecular_alkene = set(intermolecular_refs.alkene)
+    intermolecular_atropisomer = set(intermolecular_refs.atropisomer)
+    # Everything outside these sets follows the exact legacy correction path.
+    # In particular, every intramolecular stereo element remains unchanged.
+    legacy_tetrahedral_refs = tuple(
+        ref for ref in product_stereo_refs if ref not in intermolecular_tetrahedral
+    )
+    legacy_alkene_refs = tuple(
+        ref for ref in product_alkene_refs if ref not in intermolecular_alkene
+    )
+    legacy_atropisomer_refs = tuple(
+        ref
+        for ref in product_atropisomer_refs
+        if ref not in intermolecular_atropisomer
+    )
     product_chiral = chiral_constraints_from_references(product_stereo_refs)
     log_stereo_state(
         reaction,
@@ -223,11 +251,48 @@ def _generate_reaction_conformers_single(
             transformed_coords,
             product_atropisomer_refs,
         )
-        if not stereo_matches(transformed_coords, product_stereo_refs):
+        adjusted_reactant_coords, fragments_moved = (
+            reposition_intermolecular_stereochemistry(
+                reactant_coords,
+                transformed_coords,
+                reactant_mol,
+                product_mol,
+                intermolecular_refs,
+            )
+        )
+        if fragments_moved:
+            reactant_coords = adjusted_reactant_coords
+            reactant_conf = reactant_mol.GetConformer(reac_conf_id)
+            for atom_idx, position in enumerate(reactant_coords):
+                reactant_conf.SetAtomPosition(atom_idx, position)
+            transformed_coords = transform_mol(
+                reactant_coords,
+                temp_prod,
+                changing_bonds,
+            )
+            log_stereo_state(
+                reaction,
+                f"product interfragment-repositioned conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                transformed_coords,
+                product_stereo_refs,
+            )
+            log_alkene_state(
+                reaction,
+                f"product interfragment-repositioned conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                transformed_coords,
+                product_alkene_refs,
+            )
+            log_atropisomer_state(
+                reaction,
+                f"product interfragment-repositioned conf={reac_conf_id} seed={seed} stretch={stretch_factor}",
+                transformed_coords,
+                product_atropisomer_refs,
+            )
+        if not stereo_matches(transformed_coords, legacy_tetrahedral_refs):
             transformed_coords = correct_tetrahedral_stereochemistry(
                 transformed_coords,
                 product_mol,
-                product_stereo_refs,
+                legacy_tetrahedral_refs,
             )
             log_stereo_state(
                 reaction,
@@ -235,11 +300,11 @@ def _generate_reaction_conformers_single(
                 transformed_coords,
                 product_stereo_refs,
             )
-        if not alkene_stereo_matches(transformed_coords, product_alkene_refs):
+        if not alkene_stereo_matches(transformed_coords, legacy_alkene_refs):
             transformed_coords = correct_alkene_stereochemistry(
                 transformed_coords,
                 product_mol,
-                product_alkene_refs,
+                legacy_alkene_refs,
             )
             log_alkene_state(
                 reaction,
@@ -247,11 +312,13 @@ def _generate_reaction_conformers_single(
                 transformed_coords,
                 product_alkene_refs,
             )
-        if not atropisomer_stereo_matches(transformed_coords, product_atropisomer_refs):
+        if not atropisomer_stereo_matches(
+            transformed_coords, legacy_atropisomer_refs
+        ):
             transformed_coords = correct_atropisomer_stereochemistry(
                 transformed_coords,
                 product_mol,
-                product_atropisomer_refs,
+                legacy_atropisomer_refs,
             )
             log_atropisomer_state(
                 reaction,
@@ -288,24 +355,26 @@ def _generate_reaction_conformers_single(
             product_atropisomer_refs,
         )
         if (
-            not stereo_matches(final_product_coords, product_stereo_refs)
-            or not alkene_stereo_matches(final_product_coords, product_alkene_refs)
-            or not atropisomer_stereo_matches(final_product_coords, product_atropisomer_refs)
+            not stereo_matches(final_product_coords, legacy_tetrahedral_refs)
+            or not alkene_stereo_matches(final_product_coords, legacy_alkene_refs)
+            or not atropisomer_stereo_matches(
+                final_product_coords, legacy_atropisomer_refs
+            )
         ):
             corrected_coords = correct_tetrahedral_stereochemistry(
                 final_product_coords,
                 product_mol,
-                product_stereo_refs,
+                legacy_tetrahedral_refs,
             )
             corrected_coords = correct_alkene_stereochemistry(
                 corrected_coords,
                 product_mol,
-                product_alkene_refs,
+                legacy_alkene_refs,
             )
             corrected_coords = correct_atropisomer_stereochemistry(
                 corrected_coords,
                 product_mol,
-                product_atropisomer_refs,
+                legacy_atropisomer_refs,
             )
             log_stereo_state(
                 reaction,

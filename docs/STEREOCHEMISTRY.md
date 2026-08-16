@@ -33,6 +33,8 @@ Implemented now:
 - Atropisomeric axes with defined RDKit/CXSMILES bond stereochemistry.
 - Reference extraction from independently embedded reactant and product graphs.
 - Signed-volume constraints for initial product conformer relaxation.
+- Reactant-fragment repositioning when a newly specified tetrahedral, E/Z, or
+  atropisomeric product element is formed between two reactant fragments.
 - Conservative branch reflection to repair flipped tetrahedral centers.
 - Conservative substituent-branch rotation to repair flipped product E/Z alkenes.
 - Iterative-alignment guards that reject endpoint steps which invert recorded
@@ -43,7 +45,7 @@ Implemented now:
 
 Not implemented yet:
 
-- Coordinate repair or optimizer penalties for atropisomeric axis inversions.
+- Optimizer penalties for E/Z or atropisomeric descriptor inversions.
 - Square planar, trigonal bipyramidal, octahedral, or other non-tetrahedral
   stereochemical elements.
 - Full stereochemical validation of TS or IRC calculations after SPARTA hands off
@@ -268,15 +270,24 @@ Relevant steps:
    inferred from each pushed-forward conformer.
 4. Reactant coordinates are pushed forward into product topology with
    `transform_mol(...)`.
-5. Wrong-side tetrahedral centers or E/Z alkenes are conservatively corrected
-   before the first relaxation when possible.
-6. Product coordinates are relaxed to the product bounds matrix with RMSD tethering
+5. Newly specified product stereo elements that span two reactant fragments are
+   handled by moving the incoming reactant fragment, then repeating the
+   pushforward. Tetrahedral formation translates the incoming fragment to the
+   opposite reaction face; new E/Z and atropisomer axes rotate one complete
+   reactant fragment by 180 degrees about the forming axis. These rigid-body
+   operations preserve the fragment's internal geometry and stereochemistry.
+6. All intramolecular stereo elements retain the existing behavior: wrong-side
+   tetrahedral centers, E/Z alkenes, and atropisomers are conservatively corrected
+   on the product coordinates before relaxation when possible.
+7. Product coordinates are relaxed to the product bounds matrix with RMSD tethering
    to the paired reactant.
-7. Tetrahedral signed-volume penalties are passed as `chiral_constraints`.
-8. If the relaxed product mismatches the target tetrahedral or E/Z descriptors,
-   SPARTA attempts the conservative repairs again.
-9. The corrected geometry is relaxed again with the same chiral constraints.
-10. Product conformers that still mismatch any tetrahedral, E/Z, or
+8. Tetrahedral signed-volume penalties are passed as `chiral_constraints`.
+9. If the relaxed product mismatches an intramolecular or otherwise legacy
+   tetrahedral, E/Z, or atropisomer descriptor, SPARTA attempts the existing
+   conservative repairs again. Newly formed intermolecular elements are not
+   product-repaired.
+10. The corrected geometry is relaxed again with the same chiral constraints.
+11. Product conformers that still mismatch any tetrahedral, E/Z, or
     atropisomer reference are rejected.
 
 The chiral penalty lives in
