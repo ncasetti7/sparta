@@ -7,11 +7,83 @@ from rdkit import Chem
 from sparta import Reaction
 from sparta.initial_generation.bounds_matrix import (
     _generate_reaction_conformers_single,
+    _select_coverage,
+    _subset_rmsd,
     generate_initial_conformers,
 )
 
 REACTANT_SMILES = "[F:1][F:2].[Cl:3][Cl:4]"
 PRODUCT_SMILES = "[F:1][Cl:3].[F:2][Cl:4]"
+
+
+def test_subset_rmsd_removes_rigid_translation_and_rotation():
+    coords = np.array([
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [4.0, 5.0, 6.0],
+    ])
+    rotation = np.array([
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    moved = coords @ rotation + np.array([7.0, -3.0, 2.0])
+
+    assert _subset_rmsd(coords, moved, [0, 1, 2]) < 1.0e-12
+
+
+def test_coverage_rmsd_uses_only_connectivity_changing_atoms():
+    base = np.array([
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    peripheral_change = base.copy()
+    peripheral_change[3] = [10.0, 10.0, 10.0]
+    center_change = base.copy()
+    center_change[2] = [2.0, 0.0, 0.0]
+
+    records = [
+        {"id": "anchor", "reactant_coords": base, "product_coords": base},
+        {"id": "peripheral", "reactant_coords": peripheral_change,
+         "product_coords": peripheral_change},
+        {"id": "center", "reactant_coords": center_change,
+         "product_coords": center_change},
+    ]
+    mol = Chem.MolFromSmiles("CCCC")
+
+    selected = _select_coverage(
+        records, 2, 0.1, mol, mol, rmsd_atom_indices=[0, 1, 2])
+
+    assert [record["id"] for record in selected] == ["anchor", "center"]
+
+
+def test_coverage_backfills_near_duplicates_by_score():
+    base = np.array([
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+    ])
+    duplicate = base.copy()
+    distinct = base.copy()
+    distinct[2] = [2.0, 0.0, 0.0]
+    records = [
+        {"id": "anchor", "reactant_coords": base, "product_coords": base},
+        {"id": "best_duplicate", "reactant_coords": duplicate,
+         "product_coords": duplicate},
+        {"id": "distinct", "reactant_coords": distinct,
+         "product_coords": distinct},
+    ]
+    mol = Chem.MolFromSmiles("CCC")
+
+    selected = _select_coverage(
+        records, 3, 0.1, mol, mol, rmsd_atom_indices=[0, 1, 2])
+
+    assert [record["id"] for record in selected] == [
+        "anchor", "distinct", "best_duplicate",
+    ]
 
 
 @pytest.fixture(scope="module")

@@ -115,20 +115,22 @@ class Reaction:
         atoms could contact the substrate.
     diversity_rmsd : float
         RMSD threshold (Å) for diversity filtering of ``top_k_conformers``.
-        Conformer pairs are grouped into "categories" by best-fit RMSD and only
-        the best-scoring pair from each category is kept, so the top_k carry
-        distinct geometries rather than near-duplicates.  Two pairs share a
-        category when both their reactant and product RMSDs fall below this
-        value.  Set to 0 to disable (keep the best top_k purely by score).
+        RMSD is evaluated after best-fit alignment using only the atoms that
+        participate in connectivity-changing bonds. Conformer pairs are grouped
+        into "categories" by this reaction-centre RMSD and only the best-scoring
+        pair from each category is prioritized. Two pairs share a category when
+        both their reactant and product RMSDs fall below this value. If there are
+        fewer categories than ``top_k``, remaining slots are filled by score.
+        Set to 0 to disable diversity selection (keep the best top_k by score).
     selection : {'coverage', 'score'}
         How ``top_k_conformers`` is chosen from the scored pool.  'coverage'
         (default) is a farthest-point selection that maximises spread in
-        symmetry-aware RMSD space: the best-scoring pair anchors the set and each
-        further pick is the pose farthest from those already chosen, so the budget
-        spans diverse geometries for transition-state seeding rather than the
-        lowest-barrier ones.  'score' keeps the best-scoring representative of each
-        of the first ``top_k`` distinct RMSD clusters.  Both stop early once only
-        near-duplicates (within ``diversity_rmsd``) remain.
+        connectivity-changing-atom RMSD space: the best-scoring pair anchors the
+        set and each further pick is the pose farthest from those already chosen,
+        so the budget spans diverse reaction-centre geometries. 'score' keeps the
+        best-scoring representative of each of the first ``top_k`` distinct RMSD
+        clusters. Once only near-duplicates (within ``diversity_rmsd``) remain,
+        both fill any unused slots with the best-scoring remaining pairs.
     score_cap : float or None
         Feasibility gate applied before ``selection``: conformer pairs whose NEB
         score exceeds ``score_cap`` × the lowest (best) score in the pool are

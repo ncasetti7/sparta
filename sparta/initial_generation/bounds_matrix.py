@@ -490,19 +490,48 @@ def _sym_rmsd(prb: Chem.Mol, ref: Chem.Mol) -> float:
     return AllChem.GetBestRMS(prb, ref)
 
 
-def _select_diverse_top_k(conformers, top_k, rmsd_threshold, reactant_mol, product_mol):
+def _subset_rmsd(coords_a, coords_b, atom_indices):
+    """Best-fit RMSD with fixed correspondence on ``atom_indices`` only."""
+    indices = np.asarray(atom_indices, dtype=int)
+    a = np.asarray(coords_a, dtype=float)[indices]
+    b = np.asarray(coords_b, dtype=float)[indices]
+    a = a - a.mean(axis=0)
+    b = b - b.mean(axis=0)
+    u, _, vt = np.linalg.svd(a.T @ b)
+    if np.linalg.det(u @ vt) < 0.0:
+        u[:, -1] *= -1.0
+    delta = a @ (u @ vt) - b
+    return float(np.sqrt(np.mean(np.sum(delta * delta, axis=1))))
+
+
+def _backfill_by_score(conformers, selected_indices, top_k):
+    """Fill a diversity selection from the remaining score-sorted candidates."""
+    selected = list(selected_indices)
+    chosen = set(selected)
+    for index in range(len(conformers)):
+        if len(selected) >= min(top_k, len(conformers)):
+            break
+        if index not in chosen:
+            selected.append(index)
+            chosen.add(index)
+    return selected
+
+
+def _select_diverse_top_k(
+    conformers, top_k, rmsd_threshold, reactant_mol, product_mol,
+    rmsd_atom_indices=None,
+):
     """
-    Keep the best-scoring conformer pair from each symmetry-aware RMSD "category".
+    Keep the best-scoring conformer pair from each RMSD "category".
 
     ``conformers`` must be pre-sorted by ascending score, so the first pair
-    accepted into a category is automatically that category's best score.  RMSD
-    is computed with RDKit's ``GetBestRMS`` on the heavy-atom skeleton, which
-    minimises over all molecular automorphisms — so a symmetric catalyst related
-    to another conformer by a symmetry "flip" is recognised as the same
-    category.  A candidate is a duplicate of an accepted representative when
-    *both* its reactant and product symmetry-RMSDs fall below ``rmsd_threshold``
+    accepted into a category is automatically that category's best score. RMSD
+    is normally computed by fixed-correspondence Kabsch alignment on the atoms
+    whose connectivity changes. A candidate is a duplicate of an accepted
+    representative when *both* endpoint RMSDs fall below ``rmsd_threshold``
     (Å); duplicates are dropped.  Scanning stops once ``top_k`` distinct
-    representatives have been collected.
+    representatives have been collected. If fewer than ``top_k`` distinct
+    categories exist, the remaining slots are backfilled by ascending score.
 
     If ``rmsd_threshold`` is falsy (None or <= 0) the filter is disabled and the
     best ``top_k`` by score are returned unchanged.
@@ -510,36 +539,55 @@ def _select_diverse_top_k(conformers, top_k, rmsd_threshold, reactant_mol, produ
     if not rmsd_threshold or rmsd_threshold <= 0.0:
         return conformers[:top_k]
 
-    # Pre-build heavy-atom mols once per pool entry (GetBestRMS needs the graph).
-    reac_mols = [_heavy_atom_mol(reactant_mol, c["reactant_coords"]) for c in conformers]
-    prod_mols = [_heavy_atom_mol(product_mol, c["product_coords"]) for c in conformers]
+    if rmsd_atom_indices is None:
+        # Backward-compatible internal fallback for direct callers.
+        reac_mols = [
+            _heavy_atom_mol(reactant_mol, c["reactant_coords"])
+            for c in conformers
+        ]
+        prod_mols = [
+            _heavy_atom_mol(product_mol, c["product_coords"])
+            for c in conformers
+        ]
+
+        def endpoint_dist(i, j, key, mols):
+            return _sym_rmsd(mols[i], mols[j])
+    else:
+        def endpoint_dist(i, j, key, mols):
+            return _subset_rmsd(
+                conformers[i][key], conformers[j][key], rmsd_atom_indices)
+        reac_mols = prod_mols = None
 
     reps = []  # indices into conformers
     for i in range(len(conformers)):
         if any(
-            _sym_rmsd(reac_mols[i], reac_mols[j]) < rmsd_threshold
-            and _sym_rmsd(prod_mols[i], prod_mols[j]) < rmsd_threshold
+            endpoint_dist(i, j, "reactant_coords", reac_mols) < rmsd_threshold
+            and endpoint_dist(i, j, "product_coords", prod_mols) < rmsd_threshold
             for j in reps
         ):
             continue
         reps.append(i)
         if len(reps) >= top_k:
             break
+    reps = _backfill_by_score(conformers, reps, top_k)
     return [conformers[i] for i in reps]
 
 
-def _select_coverage(conformers, top_k, rmsd_floor, reactant_mol, product_mol):
+def _select_coverage(
+    conformers, top_k, rmsd_floor, reactant_mol, product_mol,
+    rmsd_atom_indices=None,
+):
     """
     Farthest-point ("coverage") selection: pick up to ``top_k`` conformer pairs
-    that maximally span pose space under symmetry-aware heavy-atom RMSD.
+    that maximally span reaction-centre geometry under RMSD.
 
     ``conformers`` must be pre-sorted by ascending score.  The best-scoring pair
     seeds the set (a feasible anchor); each subsequent pick is the pair whose
-    minimum symmetry-RMSD to the already-chosen set is largest (greedy k-center /
-    max-min), so the budget spreads across the widest range of geometries rather
-    than crowding the lowest-barrier ones.  Selection stops once that largest
+    minimum connectivity-changing-atom RMSD to the already-chosen set is largest
+    (greedy k-center / max-min), so the budget spreads across those geometries
+    rather than crowding the lowest-barrier ones. Selection stops once that largest
     minimum distance drops to ``rmsd_floor`` — i.e. only near-duplicates remain —
-    so the result holds only distinct poses and may be shorter than ``top_k``.
+    then remaining slots are backfilled from the score-sorted feasible pool.
 
     Pair distance is max(reactant_rmsd, product_rmsd), consistent with the
     "same category" definition used by the score-based filter.
@@ -549,12 +597,30 @@ def _select_coverage(conformers, top_k, rmsd_floor, reactant_mol, product_mol):
         return []
     floor = rmsd_floor if rmsd_floor and rmsd_floor > 0.0 else 0.0
 
-    reac_mols = [_heavy_atom_mol(reactant_mol, c["reactant_coords"]) for c in conformers]
-    prod_mols = [_heavy_atom_mol(product_mol, c["product_coords"]) for c in conformers]
+    if rmsd_atom_indices is None:
+        # Backward-compatible internal fallback for direct callers.
+        reac_mols = [
+            _heavy_atom_mol(reactant_mol, c["reactant_coords"])
+            for c in conformers
+        ]
+        prod_mols = [
+            _heavy_atom_mol(product_mol, c["product_coords"])
+            for c in conformers
+        ]
 
-    def pair_dist(i, j):
-        return max(_sym_rmsd(reac_mols[i], reac_mols[j]),
-                   _sym_rmsd(prod_mols[i], prod_mols[j]))
+        def pair_dist(i, j):
+            return max(_sym_rmsd(reac_mols[i], reac_mols[j]),
+                       _sym_rmsd(prod_mols[i], prod_mols[j]))
+    else:
+        def pair_dist(i, j):
+            return max(
+                _subset_rmsd(
+                    conformers[i]["reactant_coords"],
+                    conformers[j]["reactant_coords"], rmsd_atom_indices),
+                _subset_rmsd(
+                    conformers[i]["product_coords"],
+                    conformers[j]["product_coords"], rmsd_atom_indices),
+            )
 
     selected = [0]  # best-scoring pair anchors the cover (conformers are sorted)
     mindist = np.array([pair_dist(i, 0) for i in range(n)])
@@ -570,6 +636,7 @@ def _select_coverage(conformers, top_k, rmsd_floor, reactant_mol, product_mol):
                 d = pair_dist(i, far)
                 if d < mindist[i]:
                     mindist[i] = d
+    selected = _backfill_by_score(conformers, selected, top_k)
     return [conformers[i] for i in selected]
 
 
@@ -711,15 +778,23 @@ def generate_initial_conformers(
         cutoff = reaction.score_cap * valid[0]["score"]
         pool = [c for c in valid if c["score"] <= cutoff]
 
+    # Restrict diversity to the atoms directly participating in connectivity
+    # changes. This prevents remote conformational motion from consuming the
+    # finite top-k budget. Reactions without such atoms retain the legacy metric.
+    rmsd_atom_indices = sorted({
+        atom for bond in reaction.changing_bonds for atom in bond
+    }) or None
     if reaction.selection == "coverage":
         reaction.top_k_conformers = _select_coverage(
             pool, reaction.top_k, reaction.diversity_rmsd,
             reaction.reactant_mol, reaction.product_mol,
+            rmsd_atom_indices,
         )
     else:
         reaction.top_k_conformers = _select_diverse_top_k(
             pool, reaction.top_k, reaction.diversity_rmsd,
             reaction.reactant_mol, reaction.product_mol,
+            rmsd_atom_indices,
         )
 
     if calculator is not None:
