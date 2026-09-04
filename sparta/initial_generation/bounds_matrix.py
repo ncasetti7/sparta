@@ -250,24 +250,24 @@ def generate_initial_conformers(
     reaction.top_k_conformers = valid[: reaction.top_k]
 
     if calculator is not None:
-        import ase
+        # Separated-reactant reference: each connected fragment is optimised on
+        # its own and the energies summed. Optimising a multi-fragment system as
+        # one unit would leave an arbitrary inter-fragment interaction in the
+        # reference energy (the fragments are co-embedded at an arbitrary
+        # separation), which offsets every barrier measured against it -- see
+        # sparta.calculation.reference for the measured magnitude. Identical to
+        # the previous behaviour for single-fragment species.
+        from sparta.calculation.reference import fragment_reference_energy
 
-        reac_symbols = [
-            reaction.reactant_mol.GetAtomWithIdx(i).GetSymbol()
-            for i in range(reaction.reactant_mol.GetNumAtoms())
-        ]
-        prod_symbols = [
-            reaction.product_mol.GetAtomWithIdx(i).GetSymbol()
-            for i in range(reaction.product_mol.GetNumAtoms())
-        ]
-        reac_atoms = ase.Atoms(symbols=reac_symbols, positions=reaction.reac_ref_coords)
-        prod_atoms = ase.Atoms(symbols=prod_symbols, positions=reaction.prod_ref_coords)
+        reac_pos, reac_energy = fragment_reference_energy(
+            reaction.reactant_mol, reaction.reac_ref_coords, calculator
+        )
+        prod_pos, prod_energy = fragment_reference_energy(
+            reaction.product_mol, reaction.prod_ref_coords, calculator
+        )
 
-        reac_opt, reac_energy = calculator.optimize(reac_atoms)
-        prod_opt, prod_energy = calculator.optimize(prod_atoms)
-
-        reaction.reac_ref_optimized = reac_opt.get_positions()
-        reaction.prod_ref_optimized = prod_opt.get_positions()
+        reaction.reac_ref_optimized = reac_pos
+        reaction.prod_ref_optimized = prod_pos
         reaction.reac_ref_energy = reac_energy
         reaction.prod_ref_energy = prod_energy
 
