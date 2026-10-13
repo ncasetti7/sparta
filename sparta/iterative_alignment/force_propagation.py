@@ -15,13 +15,9 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import rdMolTransforms
 
-# Projection stops once every atom pair is within this distance (Å) of its bounds.
-BOUNDS_TOLERANCE = 0.01
+BOUNDS_TOLERANCE = 0.01  # Å
 MAX_PROJECTION_ITERATIONS = 500
-# An endpoint bond further than this (Å) outside its bounds no longer has the endpoint's
-# bonding. Construction routinely leaves bonds 0.01-0.26 A past RDKit's narrow bonded
-# windows (the product fit trades bond length for RMSD to the reactant), while a broken
-# bond is 0.6 A or more out.
+# bonds further than this (Å) outside their bounds count as broken
 BOND_BREAK_TOLERANCE = 0.3
 
 
@@ -399,12 +395,7 @@ def apply_endpoint_adjustment(
     the bounds matrix. Returns the RMSD of the applied displacement.
 
     The force array must already be normalised (max atomic magnitude = 1), so
-    step_size directly controls the maximum displacement in Ångströms. The step is
-    capped at ``max_displacement`` before projection, so the cap can never push a
-    projected structure back outside its bounds. Projection repeats until no pair
-    violates its bounds by more than ``BOUNDS_TOLERANCE`` or
-    ``MAX_PROJECTION_ITERATIONS`` sweeps have run; callers should check
-    :func:`bound_violation` on the result.
+    step_size directly controls the maximum displacement in Ångströms.
 
     Parameters
     ----------
@@ -438,10 +429,7 @@ def apply_endpoint_adjustment(
     lo_pairs = bounds_lower[i_idx, j_idx]
     hi_pairs = bounds_upper[i_idx, j_idx]
 
-    # Jacobi-style iterative projection onto distance bounds. Each atom's corrections
-    # are averaged over the violated pairs it belongs to; summing them overshoots and
-    # diverges when many overlapping bounds cannot all be met. The best (least
-    # violating) positions reached are kept.
+    # Jacobi-style iterative projection onto distance bounds, averaged per atom
     best_pos = new_pos.copy()
     best_worst = float("inf")
     for _ in range(MAX_PROJECTION_ITERATIONS):

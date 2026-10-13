@@ -62,11 +62,8 @@ def _relax_bounds_to_structure(
     lower: np.ndarray, upper: np.ndarray, positions: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Relax any bound the current structure already violates to the actual distance,
-    so the structure is feasible and projection only undoes what a later step
-    causes. A pair closer than its lower bound gets that distance as its lower bound;
-    a pair further than its upper bound (bonds construction left slightly long) gets
-    it as its upper bound, so no bond can stretch past its starting length.
+    Relax any lower or upper bound the current structure already violates to the
+    actual distance, so the structure is not immediately penalised during optimisation.
     """
     lower = lower.copy()
     upper = upper.copy()
@@ -335,9 +332,6 @@ def _run_alignment_single(
     reac_atoms = ase.Atoms(symbols=symbols, positions=reactant_coords.copy())
     prod_atoms = ase.Atoms(symbols=symbols, positions=product_coords.copy())
 
-    # Endpoint adjustments may never take an endpoint's own bonds past
-    # BOND_BREAK_TOLERANCE outside their bounds, so alignment cannot break a bond that
-    # defines the reactant or product. Other pairs are only projected.
     reac_bonds = np.array(sorted(cheminformatics.get_bonds(reaction.reactant_mol)), dtype=int)
     prod_bonds = np.array(sorted(cheminformatics.get_bonds(reaction.product_mol)), dtype=int)
 
@@ -443,8 +437,7 @@ def _run_alignment_single(
                 prod_atoms, final_force, bl_final, bu_final,
                 step_size=current_step, max_displacement=current_step,
             )
-            # A step that takes an endpoint's bonds further outside their bounds would
-            # change its bonding (e.g. break a metal-ligand bond), so it is rejected.
+            # reject steps that break an endpoint bond
             if (
                 bound_violation(reac_atoms.get_positions(), bl_init, bu_init, reac_bonds)
                 > BOND_BREAK_TOLERANCE

@@ -18,8 +18,7 @@ from sparta.metal_bonds import (
     untyped_metal_atoms,
 )
 
-# Ligand-free Pd CMD step from the Pistachio benchmark: C20-H21 breaks, Pd8-O9 breaks,
-# C20-Pd8 and O9-H21 form.
+# ligand-free Pd CMD step from the Pistachio benchmark
 PD_REACTANT = (
     "[F:1][c:2]1[c:3]([H:4])[c:5]([H:6])[c:7]([Pd:8][O:9][C:10]([C:11]([H:12])([H:13])"
     "[H:14])=[O:15])[c:16]([H:17])[c:18]1[H:19].[c:20]1([H:21])[c:22]([H:23])[s:24]"
@@ -30,9 +29,7 @@ PD_PRODUCT = (
     "([H:6])[c:3]([H:4])[c:2]([F:1])[c:18]([H:19])[c:16]2[H:17])[c:22]([H:23])[s:24]"
     "[c:25]([C:26](=[O:27])[H:28])[c:29]1[H:30]"
 )
-# Pd(II) with a dative phosphine, as the benchmark writes ligated complexes
 PD_PHOSPHINE = "[CH3:1][Pd:2]([Cl:3])<-[PH3:4]"
-# Rh has no UFF type RDKit can assign, so its bonds take the fallback lengths
 RH_COMPLEX = "[CH3:1][Rh:2]([Cl:3])[Cl:4]"
 RH_SELENIDE = "[CH3:1][Rh:2][SeH:3]"
 PD, PD_C, PD_O = 7, 19, 8  # zero-based indices in the CMD fixture
@@ -45,10 +42,7 @@ def _bounds(mol: Chem.Mol, i: int, j: int) -> tuple[float, float]:
 
 
 def test_pd_is_typed_square_planar_for_uff():
-    """make_mol gives Pd the SP2D hybridization UFF types as Pd4+2.
-
-    RDKit perceives SP3D2, which UFF has no Pd type for.
-    """
+    """make_mol gives Pd the SP2D hybridization UFF types as Pd4+2."""
     mol = cheminformatics.make_mol(PD_REACTANT)
     assert mol.GetAtomWithIdx(PD).GetHybridization() == HybridizationType.SP2D
     assert rdForceFieldHelpers.UFFHasAllMoleculeParams(mol)
@@ -139,10 +133,7 @@ def aligned_pd_reaction():
 
 
 def test_aligned_pd_endpoints_keep_their_bonds(aligned_pd_reaction):
-    """Alignment never breaks an endpoint's own Pd bond.
-
-    Before typing Pd and enforcing bounds, the product's Pd-C drifted to 2.9-3.5 A.
-    """
+    """Alignment never breaks an endpoint's own Pd bond."""
     result = aligned_pd_reaction.aligned_results[0]
     product = np.asarray(result["product_coords"])
     reactant = np.asarray(result["reactant_coords"])

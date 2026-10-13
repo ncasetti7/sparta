@@ -163,8 +163,7 @@ class Reaction:
             self.product_mol
         )
 
-        # Metals UFF cannot type get generic, ~1 Å-wide bond bounds and arbitrary UFF
-        # reference lengths; replace both with fallback lengths (each use warns).
+        # metals UFF cannot type get fallback bond bounds and reference lengths
         reactant_untyped = metal_bonds.untyped_metal_atoms(self.reactant_mol)
         product_untyped = metal_bonds.untyped_metal_atoms(self.product_mol)
         if reactant_untyped:

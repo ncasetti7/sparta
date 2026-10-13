@@ -1,18 +1,4 @@
-"""
-Metal-atom typing and bond-length bounds for distance geometry.
-
-RDKit perceives most transition-metal centres with a hybridization that UFF has
-no atom type for (Pd in a Pd(II) complex is perceived as SP3D2 and typed
-``Pd6+2``, which does not exist). Distance geometry then falls back to generic
-bounds about 1 Å wide for every bond to the metal, so a metal-ligand bond in an
-endpoint can sit anywhere between bonded and broken.
-
-:func:`assign_metal_hybridization` sets the hybridization that gives each
-supported metal a valid UFF type, so RDKit's bounds and UFF optimisation use
-real metal parameters. For metals UFF cannot type, :func:`tighten_metal_bond_bounds`
-replaces the generic bounds with a window around a tabulated or covalent-radius
-bond length and warns that it did so.
-"""
+"""UFF typing and fallback bond-length bounds for metal atoms."""
 
 import warnings
 from typing import Dict, Set
@@ -24,9 +10,7 @@ from rdkit.Chem.rdchem import HybridizationType
 
 METAL_ATOMIC_NUMBERS = frozenset({*range(21, 31), *range(39, 49), 57, *range(72, 81)})
 
-# Hybridization giving each metal a valid UFF atom type in RDKit, e.g. SP2D -> Pd4+2
-# (square planar). Metals absent here (Ru, Rh, Ir, Os, ...) have no UFF type RDKit
-# can assign and use the bond-length fallback below.
+# hybridization giving each metal a UFF type (e.g. SP2D -> Pd4+2); others use the fallback
 UFF_METAL_HYBRIDIZATION: Dict[str, HybridizationType] = {
     "Pd": HybridizationType.SP2D,
     "Pt": HybridizationType.SP2D,
@@ -42,11 +26,10 @@ UFF_METAL_HYBRIDIZATION: Dict[str, HybridizationType] = {
     "Ag": HybridizationType.SP,
 }
 
-# Half-width (Å) of the bounds window placed around a fallback metal bond length.
+# half-width (Å) of the fallback bounds window
 METAL_BOND_TOLERANCE = 0.15
 
-# Approximate crystallographic metal-ligand bond lengths (Å) for each metal's common
-# oxidation state, used only when UFF cannot type the metal.
+# approximate metal-ligand bond lengths (Å), used only when UFF cannot type the metal
 TYPICAL_METAL_BOND_LENGTHS: Dict[str, Dict[str, float]] = {
     "Pd": {"C": 2.00, "N": 2.05, "O": 2.05, "P": 2.30, "S": 2.30, "Cl": 2.32, "Br": 2.45,
            "I": 2.62, "H": 1.55},
@@ -97,10 +80,6 @@ def untyped_metal_atoms(mol: Chem.Mol) -> Set[int]:
     """
     Return the indices of metal atoms whose bonds need fallback bounds.
 
-    When UFF has parameters for the whole molecule there are none. Otherwise these
-    are the metals without a UFF hybridization, or every metal if all of them
-    should have been typable.
-
     Parameters
     ----------
     mol : Chem.Mol
@@ -123,9 +102,7 @@ def untyped_metal_atoms(mol: Chem.Mol) -> Set[int]:
 
 def metal_bond_length(mol: Chem.Mol, i: int, j: int) -> float:
     """
-    Return a fallback length for a bond to a metal UFF cannot type, with a warning.
-
-    The tabulated length is used when available, otherwise the sum of covalent radii.
+    Return a tabulated or covalent-radius length for a bond to a metal, with a warning.
 
     Parameters
     ----------
@@ -167,11 +144,8 @@ def tighten_metal_bond_bounds(
     bounds_matrix: np.ndarray, mol: Chem.Mol, metal_indices: Set[int]
 ) -> np.ndarray:
     """
-    Replace the generic bounds of bonds to untyped metals with a fallback window.
-
-    Each bond (dative included) to an atom in ``metal_indices`` is bounded to
-    ``metal_bond_length ± METAL_BOND_TOLERANCE``, then triangle smoothing is
-    re-run so 1-3 and longer bounds stay consistent.
+    Bound each bond to an untyped metal at ``metal_bond_length ± METAL_BOND_TOLERANCE``
+    and re-run triangle smoothing.
 
     Parameters
     ----------
