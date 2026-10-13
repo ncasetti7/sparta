@@ -19,12 +19,39 @@ from rdkit.Chem import AllChem, rdDistGeom
 
 from sparta.cheminformatics import add_more_coords_to_mol
 from sparta.initial_generation.dg_optimizer import optimize_to_bounds_matrix_and_rmsd
-from sparta.iterative_alignment.force_propagation import transform_mol
+from sparta.iterative_alignment.force_propagation import BOND_BREAK_TOLERANCE, transform_mol
 
 if TYPE_CHECKING:
     import ase
     from sparta.reaction import Reaction
     from sparta.calculation.base import Calculation
+
+
+def _bond_bound_violation(
+    coords: np.ndarray, bounds_matrix: np.ndarray, bonds: set
+) -> float:
+    """
+    Return the largest distance (Å) by which any bond lies outside its bounds.
+
+    Parameters
+    ----------
+    coords : np.ndarray, shape (n_atoms, 3)
+        Endpoint coordinates.
+    bounds_matrix : np.ndarray
+        RDKit bounds matrix (upper bounds above the diagonal, lower below).
+    bonds : set of (int, int)
+        Bonds of this endpoint, each with i < j.
+
+    Returns
+    -------
+    float
+        Largest bond-bound violation, or 0 when every bond is within its bounds.
+    """
+    worst = 0.0
+    for i, j in bonds:
+        d = float(np.linalg.norm(coords[i] - coords[j]))
+        worst = max(worst, bounds_matrix[j, i] - d, d - bounds_matrix[i, j])
+    return worst
 
 
 def _generate_reaction_conformers_single(
@@ -131,6 +158,8 @@ def _generate_reaction_conformers_single(
     used_reac_conf_ids = []
     for reac_conf_id in reac_conf_ids:
         reactant_coords = reactant_mol.GetConformer(reac_conf_id).GetPositions()
+        if _bond_bound_violation(reactant_coords, reactant_bm, reactant_bonds) > BOND_BREAK_TOLERANCE:
+            continue
         transformed_coords = transform_mol(reactant_coords, temp_prod, changing_bonds)
         final_product_coords = optimize_to_bounds_matrix_and_rmsd(
             transformed_coords,
@@ -141,6 +170,8 @@ def _generate_reaction_conformers_single(
             weight_rmsd=0.05,
             verbose=False,
         )
+        if _bond_bound_violation(final_product_coords, product_bm, product_bonds) > BOND_BREAK_TOLERANCE:
+            continue
         product_mol = add_more_coords_to_mol(final_product_coords, product_mol)
         used_reac_conf_ids.append(reac_conf_id)
         if len(product_mol.GetConformers()) >= n_conformers:

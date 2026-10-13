@@ -7,6 +7,7 @@ from sparta.iterative_alignment.optimization import (
 )
 from sparta.iterative_alignment.force_propagation import (
     apply_endpoint_adjustment,
+    bound_violation,
     compute_endpoint_gradient_barrier,
     compute_endpoint_gradient_total,
     transform_mol,
@@ -21,6 +22,7 @@ __all__ = [
     "optimize_neb_path",
     "score_conformer_pair",
     "apply_endpoint_adjustment",
+    "bound_violation",
     "compute_endpoint_gradient_barrier",
     "compute_endpoint_gradient_total",
     "transform_mol",

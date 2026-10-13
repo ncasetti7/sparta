@@ -5,6 +5,8 @@ import pytest
 import ase
 
 from sparta.iterative_alignment.force_propagation import (
+    BOUNDS_TOLERANCE,
+    bound_violation,
     _get_connected_fragment,
     _pairwise_distances,
     apply_endpoint_adjustment,
@@ -337,3 +339,34 @@ class TestApplyEndpointAdjustment:
         apply_endpoint_adjustment(atoms, force, lo, hi, step_size=5.0, max_displacement=max_d)
         per_atom = np.linalg.norm(atoms.get_positions() - pos, axis=1)
         assert per_atom.max() <= max_d + 1e-8
+
+
+class TestBoundViolation:
+    def test_reports_worst_pair(self):
+        """The largest excursion outside any pair's bounds is returned."""
+        pos = np.array([[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [0.0, 0.8, 0.0]])
+        lo = np.array([[0.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 0.0]])
+        hi = np.array([[0.0, 1.2, 2.0], [1.2, 0.0, 2.0], [2.0, 2.0, 0.0]])
+        # pair 0-1 is 0.3 above its upper bound; pair 0-2 is 0.2 below its lower bound
+        assert bound_violation(pos, lo, hi) == pytest.approx(0.3)
+
+    def test_zero_when_within_bounds(self):
+        pos = np.array([[0.0, 0.0, 0.0], [1.1, 0.0, 0.0]])
+        lo = np.array([[0.0, 1.0], [1.0, 0.0]])
+        hi = np.array([[0.0, 1.2], [1.2, 0.0]])
+        assert bound_violation(pos, lo, hi) == 0.0
+
+
+class TestProjectionTolerance:
+    def test_large_step_ends_within_bounds(self):
+        """A step that would break a tightly bounded bond is projected back within tolerance.
+
+        The cap used to be applied after projection and could push pairs back out of bounds.
+        """
+        pos = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [1.0, 1.7, 0.0]])
+        atoms = ase.Atoms(symbols=["Pd", "C", "O"], positions=pos.copy())
+        force = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        lo = np.array([[0.0, 1.95, 1.9], [1.95, 0.0, 1.0], [1.9, 1.0, 0.0]])
+        hi = np.array([[0.0, 2.07, 2.1], [2.07, 0.0, 5.0], [2.1, 5.0, 0.0]])
+        apply_endpoint_adjustment(atoms, force, lo, hi, step_size=1.0, max_displacement=1.0)
+        assert bound_violation(atoms.get_positions(), lo, hi) <= BOUNDS_TOLERANCE

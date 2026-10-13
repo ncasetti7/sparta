@@ -27,7 +27,7 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import rdDistGeom, rdmolops
 
-from sparta import cheminformatics
+from sparta import cheminformatics, metal_bonds
 
 
 class Reaction:
@@ -162,6 +162,29 @@ class Reaction:
         self.product_base_bm: np.ndarray = rdDistGeom.GetMoleculeBoundsMatrix(
             self.product_mol
         )
+
+        # metals UFF cannot type get fallback bond bounds and reference lengths
+        reactant_untyped = metal_bonds.untyped_metal_atoms(self.reactant_mol)
+        product_untyped = metal_bonds.untyped_metal_atoms(self.product_mol)
+        if reactant_untyped:
+            self.reactant_base_bm = metal_bonds.tighten_metal_bond_bounds(
+                self.reactant_base_bm, self.reactant_mol, reactant_untyped
+            )
+        if product_untyped:
+            self.product_base_bm = metal_bonds.tighten_metal_bond_bounds(
+                self.product_base_bm, self.product_mol, product_untyped
+            )
+        reactant_bonds = cheminformatics.get_bonds(self.reactant_mol)
+        product_bonds = cheminformatics.get_bonds(self.product_mol)
+        for i, j in self.changing_bonds:
+            if (i, j) in reactant_bonds and {i, j} & reactant_untyped:
+                self.reac_bond_lengths[(i, j)] = metal_bonds.metal_bond_length(
+                    self.reactant_mol, i, j
+                )
+            if (i, j) in product_bonds and {i, j} & product_untyped:
+                self.prod_bond_lengths[(i, j)] = metal_bonds.metal_bond_length(
+                    self.product_mol, i, j
+                )
 
         # ── Dihedrals and fragment topology ──────────────────────────────
         self.reactant_dihedrals = cheminformatics.get_dihedral_matches_all(self.reactant_mol)
