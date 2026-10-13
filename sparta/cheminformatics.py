@@ -11,11 +11,14 @@ from rdkit.Chem import AllChem, rdDetermineBonds, rdDistGeom, rdMolTransforms
 from rdkit.Geometry import Point3D
 from ase import Atoms
 
+from sparta.metal_bonds import assign_metal_hybridization
+
 
 def make_mol(smi: str) -> Chem.Mol:
     """
     Initialize an RDKit molecule from a mapped SMILES string, reordering atoms
-    so that atom indices match atom map numbers (1-indexed → 0-indexed).
+    so that atom indices match atom map numbers (1-indexed → 0-indexed), and
+    give metal atoms a hybridization UFF can type (see :mod:`sparta.metal_bonds`).
     """
     ps = Chem.SmilesParserParams()
     ps.removeHs = False
@@ -27,7 +30,7 @@ def make_mol(smi: str) -> Chem.Mol:
         else:
             fake_map.append(atom.GetAtomMapNum() - 1)
     indices_order = sorted(range(len(fake_map)), key=lambda x: fake_map[x])
-    return Chem.RenumberAtoms(og, indices_order)
+    return assign_metal_hybridization(Chem.RenumberAtoms(og, indices_order))
 
 
 def add_coords_to_mol(coords: np.ndarray, mol: Chem.Mol) -> Chem.Mol:
@@ -74,7 +77,7 @@ def generate_conformer(mol: Chem.Mol, smiles: str, seed: Optional[int]) -> Chem.
                 translation[i] = 5.0
             ps = Chem.SmilesParserParams()
             ps.removeHs = False
-            temp_mol = Chem.MolFromSmiles(smi, ps)
+            temp_mol = assign_metal_hybridization(Chem.MolFromSmiles(smi, ps))
             if seed is not None:
                 result = AllChem.EmbedMolecule(temp_mol, maxAttempts=100000, randomSeed=seed + 1)
             else:

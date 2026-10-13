@@ -15,6 +15,15 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import rdMolTransforms
 
+# Projection stops once every atom pair is within this distance (Å) of its bounds.
+BOUNDS_TOLERANCE = 0.01
+MAX_PROJECTION_ITERATIONS = 500
+# An endpoint bond further than this (Å) outside its bounds no longer has the endpoint's
+# bonding. Construction routinely leaves bonds 0.01-0.26 A past RDKit's narrow bonded
+# windows (the product fit trades bond length for RMSD to the reactant), while a broken
+# bond is 0.6 A or more out.
+BOND_BREAK_TOLERANCE = 0.3
+
 
 def _pairwise_distances(pos: np.ndarray) -> np.ndarray:
     """Compute symmetric (n, n) pairwise distance matrix from (n, 3) positions."""
@@ -340,6 +349,43 @@ def compute_endpoint_gradient_barrier(
     return init_force, final_force, max_img_idx
 
 
+def bound_violation(
+    positions: np.ndarray,
+    bounds_lower: np.ndarray,
+    bounds_upper: np.ndarray,
+    pairs: Optional[np.ndarray] = None,
+) -> float:
+    """
+    Return the largest distance (Å) by which an atom pair lies outside its bounds.
+
+    Pairs whose lower or upper bound is zero are unconstrained on that side.
+
+    Parameters
+    ----------
+    positions : np.ndarray, shape (n_atoms, 3)
+        Atomic positions.
+    bounds_lower, bounds_upper : np.ndarray, shape (n_atoms, n_atoms)
+        Symmetric lower and upper distance bounds.
+    pairs : np.ndarray, shape (n_pairs, 2), optional
+        Atom pairs to check, such as an endpoint's bonds; all pairs by default.
+
+    Returns
+    -------
+    float
+        Largest bound violation, or 0 when every checked pair is within its bounds.
+    """
+    if pairs is None:
+        i_idx, j_idx = np.triu_indices(len(positions), k=1)
+    else:
+        i_idx, j_idx = np.asarray(pairs, dtype=int).reshape(-1, 2).T
+    d = np.linalg.norm(positions[j_idx] - positions[i_idx], axis=1)
+    lo = bounds_lower[i_idx, j_idx]
+    hi = bounds_upper[i_idx, j_idx]
+    below = np.where(lo > 0, lo - d, 0.0)
+    above = np.where(hi > 0, d - hi, 0.0)
+    return float(max(below.max(initial=0.0), above.max(initial=0.0), 0.0))
+
+
 def apply_endpoint_adjustment(
     atoms,
     force: np.ndarray,
@@ -353,7 +399,12 @@ def apply_endpoint_adjustment(
     the bounds matrix. Returns the RMSD of the applied displacement.
 
     The force array must already be normalised (max atomic magnitude = 1), so
-    step_size directly controls the maximum displacement in Ångströms.
+    step_size directly controls the maximum displacement in Ångströms. The step is
+    capped at ``max_displacement`` before projection, so the cap can never push a
+    projected structure back outside its bounds. Projection repeats until no pair
+    violates its bounds by more than ``BOUNDS_TOLERANCE`` or
+    ``MAX_PROJECTION_ITERATIONS`` sweeps have run; callers should check
+    :func:`bound_violation` on the result.
 
     Parameters
     ----------
@@ -366,7 +417,7 @@ def apply_endpoint_adjustment(
     step_size : float
         Maximum displacement per atom (Å).
     max_displacement : float
-        Hard cap on displacement from the original position (Å).
+        Hard cap on the proposed displacement from the original position (Å).
 
     Returns
     -------
@@ -376,22 +427,37 @@ def apply_endpoint_adjustment(
     orig = atoms.get_positions().copy()
     n_atoms = len(orig)
 
-    new_pos = orig + step_size * force
+    step = step_size * force
+    per_atom = np.linalg.norm(step, axis=1)
+    if per_atom.max(initial=0.0) > max_displacement:
+        step *= max_displacement / per_atom.max()
+    new_pos = orig + step
 
     # Precompute pair indices and bound values (constant across projection iters)
     i_idx, j_idx = np.triu_indices(n_atoms, k=1)
     lo_pairs = bounds_lower[i_idx, j_idx]
     hi_pairs = bounds_upper[i_idx, j_idx]
 
-    # Jacobi-style iterative projection onto distance bounds
-    for _ in range(50):
+    # Jacobi-style iterative projection onto distance bounds. Each atom's corrections
+    # are averaged over the violated pairs it belongs to; summing them overshoots and
+    # diverges when many overlapping bounds cannot all be met. The best (least
+    # violating) positions reached are kept.
+    best_pos = new_pos.copy()
+    best_worst = float("inf")
+    for _ in range(MAX_PROJECTION_ITERATIONS):
         vec = new_pos[j_idx] - new_pos[i_idx]          # (n_pairs, 3), points i→j
         d = np.sqrt((vec * vec).sum(axis=-1))            # (n_pairs,)
 
         lower_viol = (d < lo_pairs) & (lo_pairs > 0) & (d > 1e-10)
         upper_viol = (d > hi_pairs) & (hi_pairs > 0)
-
-        if not (lower_viol.any() or upper_viol.any()):
+        worst = max(
+            np.where(lower_viol, lo_pairs - d, 0.0).max(initial=0.0),
+            np.where(upper_viol, d - hi_pairs, 0.0).max(initial=0.0),
+        )
+        if worst < best_worst:
+            best_worst = worst
+            best_pos = new_pos.copy()
+        if worst <= BOUNDS_TOLERANCE:
             break
 
         safe_d = np.where(d > 1e-10, d, 1.0)
@@ -406,18 +472,19 @@ def apply_endpoint_adjustment(
         #   upper viol → toward j     (+corr_upper * unit)
         delta_i = (corr_upper - corr_lower)[:, None] * unit  # (n_pairs, 3)
 
+        active = lower_viol | upper_viol
+        counts = np.zeros(n_atoms)
+        np.add.at(counts, i_idx[active], 1.0)
+        np.add.at(counts, j_idx[active], 1.0)
+
         displacement = np.zeros_like(new_pos)
         np.add.at(displacement, i_idx, delta_i)
         np.add.at(displacement, j_idx, -delta_i)
-        new_pos += displacement
+        new_pos = new_pos + displacement / np.maximum(counts, 1.0)[:, None]
+        if not np.all(np.isfinite(new_pos)):
+            break
 
-    # Hard cap: total displacement from original ≤ max_displacement
-    total_disp = new_pos - orig
-    per_atom = np.linalg.norm(total_disp, axis=1)
-    if per_atom.max() > max_displacement:
-        new_pos = orig + (max_displacement / per_atom.max()) * total_disp
-
-    atoms.set_positions(new_pos)
+    atoms.set_positions(best_pos)
 
     final_disp = atoms.get_positions() - orig
     return float(np.sqrt(np.mean(np.sum(final_disp ** 2, axis=1))))

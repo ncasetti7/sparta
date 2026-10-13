@@ -19,9 +19,12 @@ from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 
+from sparta import cheminformatics
 from sparta.iterative_alignment.force_propagation import (
     _pairwise_distances,
+    BOND_BREAK_TOLERANCE,
     apply_endpoint_adjustment,
+    bound_violation,
     compute_endpoint_gradient_barrier,
     compute_endpoint_gradient_total,
 )
@@ -59,11 +62,14 @@ def _relax_bounds_to_structure(
     lower: np.ndarray, upper: np.ndarray, positions: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    If the current structure already violates a lower bound (atoms closer than
-    allowed), relax that lower bound to the actual distance so the structure is
-    not immediately penalised during optimisation.
+    Relax any bound the current structure already violates to the actual distance,
+    so the structure is feasible and projection only undoes what a later step
+    causes. A pair closer than its lower bound gets that distance as its lower bound;
+    a pair further than its upper bound (bonds construction left slightly long) gets
+    it as its upper bound, so no bond can stretch past its starting length.
     """
     lower = lower.copy()
+    upper = upper.copy()
     n = positions.shape[0]
     for i in range(n):
         for j in range(i + 1, n):
@@ -71,6 +77,9 @@ def _relax_bounds_to_structure(
             if d < lower[i, j]:
                 lower[i, j] = d
                 lower[j, i] = d
+            if upper[i, j] > 0 and d > upper[i, j]:
+                upper[i, j] = d
+                upper[j, i] = d
     return lower, upper
 
 
@@ -297,6 +306,8 @@ def _run_alignment_single(
         'images'           : list of ase.Atoms — full optimised path
         'energies'         : list of float or None — per-image IDPP energies
         'score'            : float — max interior IDPP energy after optimisation
+        'max_bond_violation' : float — largest violation (Å) of either endpoint's bonds,
+                                     against the bounds relaxed to its starting structure
     """
     import ase
 
@@ -323,6 +334,12 @@ def _run_alignment_single(
     # Working ASE atoms for the endpoints (mutated during phase 3)
     reac_atoms = ase.Atoms(symbols=symbols, positions=reactant_coords.copy())
     prod_atoms = ase.Atoms(symbols=symbols, positions=product_coords.copy())
+
+    # Endpoint adjustments may never take an endpoint's own bonds past
+    # BOND_BREAK_TOLERANCE outside their bounds, so alignment cannot break a bond that
+    # defines the reactant or product. Other pairs are only projected.
+    reac_bonds = np.array(sorted(cheminformatics.get_bonds(reaction.reactant_mol)), dtype=int)
+    prod_bonds = np.array(sorted(cheminformatics.get_bonds(reaction.product_mol)), dtype=int)
 
     # State tracking
     best_score = float("inf")
@@ -426,6 +443,20 @@ def _run_alignment_single(
                 prod_atoms, final_force, bl_final, bu_final,
                 step_size=current_step, max_displacement=current_step,
             )
+            # A step that takes an endpoint's bonds further outside their bounds would
+            # change its bonding (e.g. break a metal-ligand bond), so it is rejected.
+            if (
+                bound_violation(reac_atoms.get_positions(), bl_init, bu_init, reac_bonds)
+                > BOND_BREAK_TOLERANCE
+                or bound_violation(prod_atoms.get_positions(), bl_final, bu_final, prod_bonds)
+                > BOND_BREAK_TOLERANCE
+            ):
+                if verbose:
+                    print(f"  Rejected step {current_step:.4f}: endpoints leave their bounds")
+                reac_atoms.set_positions(reac_pos_before)
+                prod_atoms.set_positions(prod_pos_before)
+                current_step *= 0.5
+                continue
 
             # Cheap evaluation: warm-started interior + loose convergence
             test_images = _build_neb_images_warm(
@@ -488,6 +519,10 @@ def _run_alignment_single(
         "images": images,
         "energies": energies,
         "score": score,
+        "max_bond_violation": max(
+            bound_violation(images[0].get_positions(), bl_init, bu_init, reac_bonds),
+            bound_violation(images[-1].get_positions(), bl_final, bu_final, prod_bonds),
+        ),
     }
 
 
