@@ -7,7 +7,7 @@ if TYPE_CHECKING:
 
 class Calculation(ABC):
     """
-    Abstract base class for single-point and geometry optimisation calculations.
+    Abstract base class for single-point and geometry optimization calculations.
 
     Subclasses must implement :meth:`energy` and :meth:`optimize`.
 
@@ -29,4 +29,4 @@ class Calculation(ABC):
 
     @abstractmethod
     def optimize(self, atoms: "ase.Atoms") -> "Tuple[ase.Atoms, float]":
-        """Return an optimised copy of *atoms* and its energy."""
+        """Return an optimized copy of *atoms* and its energy."""

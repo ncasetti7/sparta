@@ -28,7 +28,7 @@ def rxn_smiles():
 
 @pytest.fixture(scope="session")
 def simple_reaction():
-    """Minimal Reaction object — __init__ only, no conformers generated."""
+    """Minimal Reaction object, __init__ only, no conformers generated."""
     return Reaction(
         reactant_smiles=REACTANT_SMILES,
         product_smiles=PRODUCT_SMILES,

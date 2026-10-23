@@ -65,7 +65,7 @@ def _generate_reaction_conformers_single(
 
     The base bounds matrices are pulled from ``reaction.reactant_base_bm`` and
     ``reaction.product_base_bm`` (computed once in ``Reaction.__init__``) and
-    modified in-place for the given stretch_factor — no recalculation needed.
+    modified in-place for the given stretch_factor, no recalculation needed.
 
     Parameters
     ----------
@@ -208,12 +208,12 @@ def generate_initial_conformers(
     Parameters
     ----------
     reaction : Reaction
-        A fully initialised :class:`~sparta.reaction.Reaction` object.
+        A fully initialized :class:`~sparta.reaction.Reaction` object.
     n_workers : int
         Number of parallel worker processes for conformer scoring.  Set > 1
         to use ``concurrent.futures.ProcessPoolExecutor``.
     calculator : Calculation, optional
-        If provided, optimise the seed-0 UFF reference conformers stored in
+        If provided, optimize the seed-0 UFF reference conformers stored in
         ``reaction.reac_ref_coords`` and ``reaction.prod_ref_coords`` and store
         the results in ``reaction.reac_ref_optimized``, ``reaction.prod_ref_optimized``,
         ``reaction.reac_ref_energy``, and ``reaction.prod_ref_energy``.
@@ -281,13 +281,13 @@ def generate_initial_conformers(
     reaction.top_k_conformers = valid[: reaction.top_k]
 
     if calculator is not None:
-        # Separated-reactant reference: each connected fragment is optimised on
-        # its own and the energies summed. Optimising a multi-fragment system as
+        # Separated-reactant reference: each connected fragment is optimized on
+        # its own and the energies summed. Optimizing a multi-fragment system as
         # one unit would leave an arbitrary inter-fragment interaction in the
         # reference energy (the fragments are co-embedded at an arbitrary
         # separation), which offsets every barrier measured against it -- see
         # sparta.calculation.reference for the measured magnitude. Identical to
-        # the previous behaviour for single-fragment species.
+        # the previous behavior for single-fragment species.
         from sparta.calculation.reference import fragment_reference_energy
 
         reac_pos, reac_energy = fragment_reference_energy(

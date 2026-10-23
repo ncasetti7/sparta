@@ -1,8 +1,33 @@
 [project]
-name = "sparta"
-version = "0.1.0"
+# The import name stays `sparta`; only the distribution name is qualified,
+# because `sparta` on PyPI is an unrelated RDF library.
+name = "sparta-chem"
+version = "0.2.0"
 description = "Steric Path Alignment for Reactive Transformation Assessment"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+authors = [
+    { name = "Nicholas Casetti", email = "ncasetti@mit.edu" },
+]
+keywords = [
+    "chemistry",
+    "cheminformatics",
+    "reaction-path",
+    "transition-state",
+    "computational-chemistry",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
 dependencies = [
     "ase>=3.26.0",
     "rdkit>=2025.9.1",
@@ -10,12 +35,28 @@ dependencies = [
     "numpy>=1.24",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ncasetti7/sparta"
+Repository = "https://github.com/ncasetti7/sparta"
+Issues = "https://github.com/ncasetti7/sparta/issues"
+
+[project.scripts]
+sparta = "sparta.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = [
+# The distribution is named sparta-chem but the package directory is sparta,
+# so hatchling has to be told where to look.
+[tool.hatch.build.targets.wheel]
+packages = ["sparta"]
+
+[tool.hatch.build.targets.sdist]
+include = ["sparta", "tests", "README.md", "LICENSE"]
+
+[dependency-groups]
+dev = [
     "pytest>=8.0",
 ]
 

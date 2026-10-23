@@ -1,0 +1,81 @@
+name: Release
+
+# Publishes to PyPI when a version tag is pushed. The build is gated on the
+# full test matrix, so a tag that does not pass tests never reaches PyPI.
+#
+# Authentication uses PyPI Trusted Publishing (OIDC) rather than a stored API
+# token. Before the first release, add a trusted publisher on PyPI for the
+# project `sparta-chem` with:
+#   owner            ncasetti7
+#   repository       sparta
+#   workflow         release.yml
+#   environment      pypi
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --all-extras
+      - name: Run tests
+        run: uv run pytest -v --tb=short
+
+  build:
+    name: Build distributions
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build sdist and wheel
+        run: uv build
+      # Catches a malformed README or missing metadata before upload, which
+      # PyPI would otherwise reject after the tag is already public.
+      - name: Check metadata
+        run: uvx twine check dist/*
+      - name: Confirm the tag matches the project version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER=$(uvx --from hatch hatch version 2>/dev/null \
+                || grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          echo "tag=$TAG project=$VER"
+          test "$TAG" = "$VER" || {
+            echo "::error::tag $TAG does not match pyproject version $VER"
+            exit 1
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # required for Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

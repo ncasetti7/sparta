@@ -174,8 +174,8 @@ class TestEndpointGradientTotal:
         total_norm = np.linalg.norm(init_f) + np.linalg.norm(final_f)
         assert total_norm > 0.0
 
-    def test_normalised_max_one_when_perturbed(self):
-        """When forces are nonzero they should be normalised to max-norm = 1."""
+    def test_normalized_max_one_when_perturbed(self):
+        """When forces are nonzero they should be normalized to max-norm = 1."""
         images = self._perturbed_images()
         init_f, final_f = compute_endpoint_gradient_total(images)
         max_norm = max(
@@ -196,8 +196,8 @@ class TestEndpointGradientBarrier:
         assert final_f.shape == (2, 3)
         assert 1 <= idx <= len(two_atom_ase_images) - 2
 
-    def test_normalised_max_one_when_perturbed(self):
-        """Normalisation should give max-norm = 1 when forces are nonzero."""
+    def test_normalized_max_one_when_perturbed(self):
+        """Normalization should give max-norm = 1 when forces are nonzero."""
         initial = np.array([[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]])
         final = np.array([[0.0, 0.0, 0.0], [2.8, 0.0, 0.0]])
         images = []
@@ -257,7 +257,7 @@ class TestEndpointGradientCaching:
 
 
 # ---------------------------------------------------------------------------
-# compute_endpoint_gradient_barrier — max-index correctness
+# compute_endpoint_gradient_barrier, max-index correctness
 # ---------------------------------------------------------------------------
 
 class TestEndpointGradientBarrierMaxIdx:
@@ -269,7 +269,7 @@ class TestEndpointGradientBarrierMaxIdx:
         for k in range(5):
             alpha = k / 4
             pos = (1 - alpha) * initial + alpha * final
-            # Image 3 has a large deviation — should be the barrier
+            # Image 3 has a large deviation, should be the barrier
             if k == 3:
                 pos = pos + np.array([[1.0, 0.5, 0.0], [-1.0, -0.5, 0.0]])
             images.append(ase.Atoms(symbols=["F", "F"], positions=pos.copy()))
@@ -320,7 +320,7 @@ class TestApplyEndpointAdjustment:
         """Atoms that start too close should be pushed apart to satisfy lower bound."""
         pos = np.array([[0.0, 0.0, 0.0], [0.4, 0.0, 0.0]])  # distance = 0.4
         atoms = ase.Atoms(symbols=["F", "F"], positions=pos.copy())
-        force = np.zeros((2, 3))  # no driving force — bounds projection only
+        force = np.zeros((2, 3))  # no driving force, bounds projection only
         n = 2
         lo = np.array([[0.0, 1.5], [1.5, 0.0]])  # require distance >= 1.5
         hi = np.full((n, n), 10.0)

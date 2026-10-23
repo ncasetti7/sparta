@@ -1,5 +1,5 @@
 """
-Reaction — central data class for reactant-product alignment.
+Reaction, central data class for reactant-product alignment.
 
 Typical usage::
 
@@ -46,7 +46,7 @@ class Reaction:
         the reactant SMILES (reactant and product must agree).  Passed to any
         calculator supplied to :meth:`generate_initial_conformers` or
         :meth:`run_iterative_alignment`, overriding whatever charge the
-        calculator was initialised with.
+        calculator was initialized with.
     multiplicity : int, optional
         Spin multiplicity (2S + 1).  If omitted, inferred from the number of
         radical electrons in the reactant SMILES (``n_radical_electrons + 1``).
@@ -69,7 +69,7 @@ class Reaction:
     k_nearest_dihedrals : int
         Bond-distance cutoff for dihedral filtering.
     cutoff : float
-        Neighbour-pair cutoff (Å) used during overlap evaluation.
+        Neighbor-pair cutoff (Å) used during overlap evaluation.
     rotation : bool or None
         Whether to include fragment rotations in the alignment optimization.
         Defaults to True.
@@ -131,7 +131,7 @@ class Reaction:
         # ── Reaction topology ─────────────────────────────────────────────
         self.changing_bonds: List[Tuple[int, int]] = self._compute_changing_bonds()
 
-        # ── Reference conformers for bond-length initialisation ───────────
+        # ── Reference conformers for bond-length initialization ───────────
         # A quick UFF conformer (seed=0) is embedded here solely to obtain
         # reference bond lengths.  The proper ETKDG conformers are generated
         # in generate_initial_conformers().
@@ -241,7 +241,7 @@ class Reaction:
         self.aligned_results: List[Dict] = []
 
         # ── Calculator results (populated when a Calculation is supplied) ──
-        # Optimised ref conformer geometry and energy (from generate_initial_conformers)
+        # Optimized ref conformer geometry and energy (from generate_initial_conformers)
         self.reac_ref_optimized: Optional[np.ndarray] = None
         self.prod_ref_optimized: Optional[np.ndarray] = None
         self.reac_ref_energy: Optional[float] = None
@@ -276,8 +276,8 @@ class Reaction:
         n_workers : int
             Parallel worker processes for conformer scoring.
         calculator : Calculation, optional
-            If provided, optimise the seed-0 UFF reference conformers and store
-            the optimised geometries and energies in ``reac_ref_optimized``,
+            If provided, optimize the seed-0 UFF reference conformers and store
+            the optimized geometries and energies in ``reac_ref_optimized``,
             ``prod_ref_optimized``, ``reac_ref_energy``, and ``prod_ref_energy``.
 
         Returns ``self`` to allow method chaining.
@@ -302,7 +302,7 @@ class Reaction:
         calculator=None,
     ) -> "Reaction":
         """
-        Run iterative IDPP path optimisation on each conformer in
+        Run iterative IDPP path optimization on each conformer in
         ``self.top_k_conformers`` and populate ``self.aligned_results``.
 
         Must be called after :meth:`generate_initial_conformers`.
@@ -321,8 +321,8 @@ class Reaction:
         max_iterations : int
             Maximum phase-2/3 iterations per conformer.
         objective : {'barrier', 'total'}
-            'barrier' — minimise max interior IDPP energy (barrier height).
-            'total'   — minimise sum of interior IDPP energies.
+            'barrier', minimize max interior IDPP energy (barrier height).
+            'total', minimize sum of interior IDPP energies.
         d_power : int
             IDPP distance weighting exponent.
         verbose : bool

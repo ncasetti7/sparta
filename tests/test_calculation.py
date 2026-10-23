@@ -33,7 +33,7 @@ XTB_OUTPUT_ALTERNATE = """\
 
 @pytest.fixture
 def lj_calculator():
-    """LennardJones calculator — pure ASE, no external binary required."""
+    """LennardJones calculator, pure ASE, no external binary required."""
     from ase.calculators.lj import LennardJones
     return LennardJones(rc=10.0)
 
@@ -179,7 +179,7 @@ class TestASECalculation:
         assert opt_atoms.get_chemical_symbols() == h2_near_eq.get_chemical_symbols()
 
     def test_optimize_energy_lower_than_input(self, lj_calculator, h2_near_eq):
-        """Optimised energy should be lower than the input single-point energy."""
+        """Optimized energy should be lower than the input single-point energy."""
         input_energy = ASECalculation(lj_calculator).energy(h2_near_eq)
         _, opt_energy = ASECalculation(lj_calculator).optimize(h2_near_eq)
         assert opt_energy < input_energy

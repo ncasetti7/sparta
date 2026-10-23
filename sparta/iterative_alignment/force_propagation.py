@@ -6,7 +6,7 @@ displacement must propagate to all atoms on the moving side of the bond.
 These functions implement that propagation using BFS on the molecular graph.
 
 Also contains endpoint gradient computation and adjustment used during
-iterative NEB optimisation.
+iterative NEB optimization.
 """
 
 from typing import List, Optional, Tuple
@@ -157,7 +157,7 @@ def compute_endpoint_gradient_total(
     initial and final endpoint distances. The chain rule gives the contribution
     to the force on each endpoint atom.
 
-    Forces are normalised so the maximum atomic magnitude equals 1.
+    Forces are normalized so the maximum atomic magnitude equals 1.
 
     Parameters
     ----------
@@ -189,7 +189,7 @@ def compute_endpoint_gradient_total(
     d_i_vals = d_initial[i_idx, j_idx]   # (n_pairs,)
     d_f_vals = d_final[i_idx, j_idx]     # (n_pairs,)
 
-    # Precompute endpoint diff vectors — constant across all images
+    # Precompute endpoint diff vectors, constant across all images
     valid_i = d_i_vals > 1e-10
     valid_f = d_f_vals > 1e-10
     safe_di = np.where(valid_i, d_i_vals, 1.0)
@@ -394,7 +394,7 @@ def apply_endpoint_adjustment(
     Move endpoint atoms along the propagated force, then project back to satisfy
     the bounds matrix. Returns the RMSD of the applied displacement.
 
-    The force array must already be normalised (max atomic magnitude = 1), so
+    The force array must already be normalized (max atomic magnitude = 1), so
     step_size directly controls the maximum displacement in Ångströms.
 
     Parameters
@@ -402,7 +402,7 @@ def apply_endpoint_adjustment(
     atoms : ase.Atoms
         Endpoint to adjust (modified in place).
     force : np.ndarray, shape (n_atoms, 3)
-        Normalised propagated force on this endpoint.
+        Normalized propagated force on this endpoint.
     bounds_lower, bounds_upper : np.ndarray, shape (n_atoms, n_atoms)
         Symmetric lower and upper distance bounds.
     step_size : float

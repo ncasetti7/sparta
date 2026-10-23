@@ -17,6 +17,8 @@ import contextlib
 import os
 from typing import TYPE_CHECKING, Dict, List, Literal, Optional, Tuple
 
+import warnings
+
 import numpy as np
 
 from sparta import cheminformatics
@@ -63,7 +65,8 @@ def _relax_bounds_to_structure(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Relax any lower or upper bound the current structure already violates to the
-    actual distance, so the structure is not immediately penalised during optimisation.
+    actual distance, so the structure is not immediately penalized during
+    optimization.
     """
     lower = lower.copy()
     upper = upper.copy()
@@ -81,7 +84,7 @@ def _relax_bounds_to_structure(
 
 
 # ---------------------------------------------------------------------------
-# NEB path optimisation (fixed endpoints)
+# NEB path optimization (fixed endpoints)
 # ---------------------------------------------------------------------------
 
 def _build_neb_images(reactant_positions, product_positions, symbols, n_images):
@@ -160,7 +163,7 @@ def optimize_neb_path(
     verbose: bool = False,
 ) -> Tuple[list, List[Optional[float]], list]:
     """
-    Run a single IDPP NEB optimisation between a reactant/product conformer pair.
+    Run a single IDPP NEB optimization between a reactant/product conformer pair.
 
     Parameters
     ----------
@@ -253,7 +256,7 @@ def _run_alignment_single(
     verbose: bool = False,
 ) -> Dict:
     """
-    Iterative IDPP path optimisation with force propagation to endpoints.
+    Iterative IDPP path optimization with force propagation to endpoints.
 
     Alternates between:
       - Phase 2: Standard IDPP NEB with fixed endpoints.
@@ -291,20 +294,21 @@ def _run_alignment_single(
     max_iterations : int
         Maximum phase-2/3 iterations.
     objective : {'total', 'barrier'}
-        'total'   — minimise sum of interior image energies.
-        'barrier' — minimise max interior image energy.
+        'total', minimize sum of interior image energies.
+        'barrier', minimize max interior image energy.
     verbose : bool
 
     Returns
     -------
     dict with keys:
-        'reactant_coords'  : np.ndarray — final reactant endpoint positions
-        'product_coords'   : np.ndarray — final product endpoint positions
-        'images'           : list of ase.Atoms — full optimised path
-        'energies'         : list of float or None — per-image IDPP energies
-        'score'            : float — max interior IDPP energy after optimisation
-        'max_bond_violation' : float — largest violation (Å) of either endpoint's bonds,
-                                     against the bounds relaxed to its starting structure
+        'reactant_coords'  : np.ndarray, final reactant endpoint positions
+        'product_coords'   : np.ndarray, final product endpoint positions
+        'images'           : list of ase.Atoms, full optimized path
+        'energies'         : list of float or None, per-image IDPP energies
+        'score'            : float, max interior IDPP energy after optimization
+        'max_bond_violation' : float, largest violation (A) of either endpoint's
+                               bonds, against the bounds relaxed to its starting
+                               structure
     """
     import ase
 
@@ -356,7 +360,7 @@ def _run_alignment_single(
 
     for iteration in range(max_iterations):
         if verbose:
-            print(f"\n=== Iteration {iteration + 1}: Phase 2 — NEB with fixed endpoints ===")
+            print(f"\n=== Iteration {iteration + 1}: Phase 2, NEB with fixed endpoints ===")
 
         # Phase 2: NEB with current endpoints.
         # Warm-start from the last accepted backtracking solution when available.
@@ -473,7 +477,7 @@ def _run_alignment_single(
                 current_step = propagation_step_size  # reset after acceptance
                 # Warm-start next Phase 2 from this (cheap) NEB solution
                 warm_images = [img.copy() for img in test_images]
-                # Invalidate distance cache — endpoints have moved
+                # Invalidate distance cache, endpoints have moved
                 d_initial_cache = None
                 d_final_cache = None
                 break
@@ -523,6 +527,95 @@ def _run_alignment_single(
 # Public high-level entry point
 # ---------------------------------------------------------------------------
 
+HARTREE_TO_KCAL = 627.509474
+
+
+def _attach_electronic_energies(reaction, calculator, sp_images="all"):
+    """Evaluate electronic energies on the aligned paths and store the barrier.
+
+    The IDPP score ranks geometry; it is not an energy. This adds the quantity
+    the method actually reports: the highest interior image energy measured
+    against a reactant reference in which each connected fragment is relaxed on
+    its own. Co-optimizing a multi-fragment reactant instead would fold an
+    arbitrary inter-fragment interaction into every barrier.
+
+    Results are written into ``aligned_results`` so the geometric and
+    electronic quantities stay together, and the reaction is re-sorted by
+    barrier so ``aligned_results[0]`` is the best by the reported metric.
+
+    ``sp_images="all"`` evaluates every interior image; ``"peak"`` evaluates
+    only the image the IDPP path puts highest, which is cheaper but assumes
+    the IDPP peak and the electronic peak coincide.
+    """
+    import ase
+
+    from sparta.calculation.reference import fragment_reference_energy
+
+    symbols = [
+        reaction.reactant_mol.GetAtomWithIdx(i).GetSymbol()
+        for i in range(reaction.reactant_mol.GetNumAtoms())
+    ]
+
+    # one reference per reaction, not per conformer: it depends only on the
+    # reactant identity, and it is the most expensive single piece
+    _, reac_ref = fragment_reference_energy(
+        reaction.reactant_mol, reaction.reac_ref_coords, calculator
+    )
+    reaction.reference_energy = reac_ref
+
+    for result in reaction.aligned_results:
+        interior = result["images"][1:-1]
+        if sp_images == "peak":
+            k = int(np.argmax(result["energies"][1:-1]))
+            idx, atoms_list = [k], [interior[k]]
+        else:
+            idx, atoms_list = list(range(len(interior))), interior
+
+        energies = []
+        first_error = None
+        for atoms in atoms_list:
+            try:
+                energies.append(calculator.energy(atoms))
+            except Exception as exc:          # one bad image should not sink
+                energies.append(float("nan"))  # the whole path
+                if first_error is None:
+                    first_error = exc
+
+        # A calculator that cannot handle these elements fails on every image
+        # and would otherwise hand back a silent nan barrier.
+        if first_error is not None and not any(e == e for e in energies):
+            warnings.warn(
+                f"every single-point evaluation failed, so the barrier is nan. "
+                f"First error: {first_error!r}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        result["electronic_energies"] = energies
+        result["electronic_image_idx"] = [i + 1 for i in idx]
+
+        finite = [e for e in energies if e == e]
+        if finite and reac_ref is not None:
+            peak = max(finite)
+            result["barrier_kcal"] = (peak - reac_ref) * HARTREE_TO_KCAL
+            result["peak_image_idx"] = idx[energies.index(peak)] + 1
+        else:
+            result["barrier_kcal"] = float("nan")
+            result["peak_image_idx"] = None
+
+        # kept for backward compatibility with code written against 0.1.0
+        result["reactant_energy"] = reac_ref
+
+    scored = [r for r in reaction.aligned_results if r["barrier_kcal"] == r["barrier_kcal"]]
+    if scored:
+        reaction.aligned_results.sort(
+            key=lambda r: (r["barrier_kcal"] != r["barrier_kcal"], r["barrier_kcal"])
+        )
+        reaction.barrier_kcal = reaction.aligned_results[0]["barrier_kcal"]
+    else:
+        reaction.barrier_kcal = float("nan")
+
+
 def run_iterative_alignment(
     reaction: "Reaction",
     neb_fmax: float = 0.001,
@@ -532,18 +625,19 @@ def run_iterative_alignment(
     propagation_threshold: float = 0.0001,
     propagation_step_size: float = 2.0,
     max_iterations: int = 40,
-    objective: str = "barrier",
+    objective: str = "peak",
     d_power: int = 4,
     verbose: bool = False,
     n_workers: int = 1,
     calculator: "Optional[Calculation]" = None,
+    sp_images: str = "all",
 ) -> "Reaction":
     """
-    Run iterative IDPP path optimisation on each conformer in
+    Run iterative IDPP path optimization on each conformer in
     ``reaction.top_k_conformers`` and populate ``reaction.aligned_results``
     (sorted by max interior IDPP energy, ascending).
 
-    Requires ``reaction.top_k_conformers`` to be populated — call
+    Requires ``reaction.top_k_conformers`` to be populated, call
     :func:`~sparta.initial_generation.bounds_matrix.generate_initial_conformers` first.
 
     Bounds matrices stored in each conformer dict are reused directly; nothing
@@ -571,8 +665,8 @@ def run_iterative_alignment(
     max_iterations : int
         Maximum phase-2/3 iterations per conformer.
     objective : {'barrier', 'total'}
-        'barrier' — minimise max interior IDPP energy.
-        'total'   — minimise sum of interior IDPP energies.
+        'barrier', minimize max interior IDPP energy.
+        'total', minimize sum of interior IDPP energies.
     d_power : int
         IDPP distance weighting exponent.
     verbose : bool
@@ -641,24 +735,7 @@ def run_iterative_alignment(
     reaction.aligned_results = results
 
     if calculator is not None and reaction.aligned_results:
-        import ase
-
-        best = reaction.aligned_results[0]
-        symbols = [
-            reaction.reactant_mol.GetAtomWithIdx(i).GetSymbol()
-            for i in range(reaction.reactant_mol.GetNumAtoms())
-        ]
-
-        reaction.best_reac_sp_energy = calculator.energy(
-            ase.Atoms(symbols=symbols, positions=best["reactant_coords"])
-        )
-        reaction.best_prod_sp_energy = calculator.energy(
-            ase.Atoms(symbols=symbols, positions=best["product_coords"])
-        )
-
-        interior_energies = best["energies"][1:-1]
-        max_interior_idx = int(np.argmax(interior_energies)) + 1
-        reaction.best_midpoint_sp_energy = calculator.energy(best["images"][max_interior_idx])
+        _attach_electronic_energies(reaction, calculator, sp_images)
 
     return reaction
 
@@ -680,13 +757,26 @@ def find_optimal_stretch_factor(
     propagation_threshold: float = 0.0001,
     propagation_step_size: float = 2.0,
     max_iterations: int = 40,
-    objective: str = "barrier",
+    objective: str = "peak",
     d_power: int = 4,
     verbose: bool = False,
+    patience: int = 3,
+    calculator: "Optional[Calculation]" = None,
+    rank_by: str = "auto",
+    sp_images: str = "all",
 ) -> "Reaction":
     """
-    Search for the optimal stretch factor by incrementally increasing from
-    ``start`` until the best alignment score stops improving.
+    Search for the best stretch factor by increasing from ``start`` until the
+    score stops improving for ``patience`` consecutive factors.
+
+    ``patience=1`` stops at the first factor that fails to improve, which is
+    cheap but leaves real gains on the table when the score is not monotonic
+    in the stretch factor. The default of 3 matches the setting used for the
+    published results.
+
+    When ``calculator`` is given, factors are ranked by the electronic barrier
+    rather than by the IDPP score, which is what the reported metric is. Set
+    ``rank_by="idpp"`` to rank geometrically even with a calculator attached.
 
     For each stretch factor a fresh :class:`~sparta.reaction.Reaction` is
     created (copying all settings from *reaction*) and the full
@@ -742,6 +832,7 @@ def find_optimal_stretch_factor(
 
     best_score = float("inf")
     best_reaction = None
+    misses = 0
 
     stretch = start
     while stretch <= max_stretch + 1e-9:
@@ -767,7 +858,10 @@ def find_optimal_stretch_factor(
             if not trial.top_k_conformers:
                 stretch = round(stretch + step, 10)
                 continue
-            trial = run_iterative_alignment(trial, **alignment_kwargs)
+            trial = run_iterative_alignment(
+                trial, calculator=calculator, sp_images=sp_images,
+                **alignment_kwargs
+            )
         except Exception:
             stretch = round(stretch + step, 10)
             continue
@@ -776,16 +870,29 @@ def find_optimal_stretch_factor(
             stretch = round(stretch + step, 10)
             continue
 
-        score = trial.aligned_results[0]["score"]
+        use_barrier = calculator is not None and rank_by in ("auto", "barrier")
+        if use_barrier:
+            score = trial.aligned_results[0].get("barrier_kcal", float("nan"))
+            if score != score:                      # every image failed
+                stretch = round(stretch + step, 10)
+                continue
+        else:
+            score = trial.aligned_results[0]["score"]
 
         if verbose:
-            print(f"stretch_factor={stretch:.2f}  best_score={score:.6f}")
+            unit = "barrier_kcal" if use_barrier else "idpp_score"
+            print(f"stretch_factor={stretch:.2f}  {unit}={score:.6f}")
 
         if score < best_score - 1e-8:
             best_score = score
             best_reaction = trial
+            misses = 0
         else:
-            break
+            # not an improvement; give the scan `patience` of these before
+            # concluding the trend has turned
+            misses += 1
+            if misses >= patience:
+                break
 
         stretch = round(stretch + step, 10)
 
@@ -796,3 +903,70 @@ def find_optimal_stretch_factor(
         )
 
     return best_reaction
+
+
+# ---------------------------------------------------------------------------
+# High-level entry points
+# ---------------------------------------------------------------------------
+def sparta_barrier(
+    reaction: "Reaction",
+    calculator: "Calculation",
+    sp_images: str = "all",
+) -> float:
+    """The SPARTA barrier for an already-aligned reaction, in kcal/mol.
+
+    The highest interior image energy measured against a reactant reference in
+    which each connected fragment is relaxed separately. Call after
+    :func:`run_iterative_alignment`; if that was already given the same
+    calculator the stored value is reused rather than recomputed.
+    """
+    if not getattr(reaction, "aligned_results", None):
+        raise ValueError(
+            "sparta_barrier: no aligned results. Run generate_initial_conformers "
+            "and run_iterative_alignment first, or use run_sparta."
+        )
+    if "barrier_kcal" not in reaction.aligned_results[0]:
+        _attach_electronic_energies(reaction, calculator, sp_images)
+    return reaction.aligned_results[0]["barrier_kcal"]
+
+
+def run_sparta(
+    reaction: "Reaction",
+    calculator: "Calculation",
+    stretch_factors: "Optional[Sequence[float]]" = None,
+    patience: int = 3,
+    n_workers: int = 1,
+    sp_images: str = "all",
+    verbose: bool = False,
+    **alignment_kwargs,
+) -> "Reaction":
+    """Generate, align, score and reduce to a single barrier, in one call.
+
+    This is the published pipeline. By default it scans stretch factors from
+    1.0 to 2.0 in steps of 0.1, stopping once ``patience`` consecutive factors
+    fail to lower the barrier, and keeps one endpoint pair per factor. Pass an
+    explicit ``stretch_factors`` list to evaluate a fixed set instead of
+    scanning.
+
+    The reaction is returned with ``barrier_kcal`` set and ``aligned_results``
+    sorted by barrier, so ``reaction.aligned_results[0]`` is the best path.
+    """
+    # imported here, as find_optimal_stretch_factor does, to avoid a circular
+    # import between initial_generation and iterative_alignment
+    from sparta.initial_generation import generate_initial_conformers
+
+    reaction.top_k = 1                      # one pair per factor, as published
+
+    if stretch_factors is not None:
+        reaction.stretch_factors = [float(sf) for sf in stretch_factors]
+        reaction = generate_initial_conformers(reaction, n_workers=n_workers)
+        return run_iterative_alignment(
+            reaction, calculator=calculator, sp_images=sp_images,
+            n_workers=n_workers, verbose=verbose, **alignment_kwargs
+        )
+
+    return find_optimal_stretch_factor(
+        reaction, start=1.0, step=0.1, max_stretch=2.0,
+        patience=patience, calculator=calculator, sp_images=sp_images,
+        n_workers=n_workers, verbose=verbose, **alignment_kwargs
+    )
