@@ -48,18 +48,6 @@ class XTBCalculation(Calculation):
             "--chrg", str(self.charge),
             "--uhf", str(self.multiplicity - 1),
         ] + extra_args
-        # xtb is an external program, not a Python dependency, so a missing
-        # binary is the single most likely first-run failure. Say so plainly
-        # rather than letting FileNotFoundError surface from subprocess.
-        if shutil.which(self._xtb_cmd) is None and not os.path.isfile(self._xtb_cmd):
-            raise FileNotFoundError(
-                f"xtb executable {self._xtb_cmd!r} not found on PATH. SPARTA "
-                "does not bundle a quantum-chemistry program; install xtb "
-                "(https://github.com/grimme-lab/xtb) and make sure it is on "
-                "PATH, or pass xtb_cmd with an explicit path. Only the "
-                "calculator-backed features need it -- path generation and "
-                "alignment do not."
-            )
         try:
             result = subprocess.run(
                 cmd, cwd=tmpdir, capture_output=True, text=True,
@@ -68,6 +56,20 @@ class XTBCalculation(Calculation):
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
                 f"xtb timed out after {self._timeout}s"
+            ) from exc
+        except FileNotFoundError as exc:
+            # xtb is an external program, not a Python dependency, so a
+            # missing binary is the most likely first-run failure. Re-raise
+            # with something actionable. Checking PATH up front instead would
+            # pre-empt tests that patch subprocess.run to exercise this
+            # wrapper without a real binary.
+            raise FileNotFoundError(
+                f"xtb executable {self._xtb_cmd!r} not found on PATH. SPARTA "
+                "does not bundle a quantum-chemistry program; install xtb "
+                "(https://github.com/grimme-lab/xtb) and make sure it is on "
+                "PATH, or pass xtb_cmd with an explicit path. Only the "
+                "calculator-backed features need it, path generation and "
+                "alignment do not."
             ) from exc
         if result.returncode != 0:
             raise RuntimeError(
