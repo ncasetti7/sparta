@@ -30,6 +30,9 @@ class ASECalculation(Calculation):
         Maximum optimization steps.
     """
 
+    #: ASE reports in eV, unlike the method-native Hartree of the xtb wrapper
+    energy_unit: str = "eV"
+
     def __init__(
         self,
         calculator: ase.calculators.calculator.Calculator,

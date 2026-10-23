@@ -527,7 +527,14 @@ def _run_alignment_single(
 # Public high-level entry point
 # ---------------------------------------------------------------------------
 
-HARTREE_TO_KCAL = 627.509474
+# CODATA, at enough digits that the two are mutually consistent: their ratio
+# is the Hartree-to-eV factor to 1e-12, so a calculator reporting in either
+# unit gives the same barrier.
+HARTREE_TO_KCAL = 627.5094740631
+EV_TO_KCAL = 23.060547830619
+
+#: Calculations report in their own units; the barrier is always kcal/mol.
+_TO_KCAL = {"hartree": HARTREE_TO_KCAL, "ev": EV_TO_KCAL, "kcal/mol": 1.0}
 
 
 def _attach_electronic_energies(reaction, calculator, sp_images="all"):
@@ -550,6 +557,14 @@ def _attach_electronic_energies(reaction, calculator, sp_images="all"):
     import ase
 
     from sparta.calculation.reference import fragment_reference_energy
+
+    unit = getattr(calculator, "energy_unit", "hartree").lower()
+    if unit not in _TO_KCAL:
+        raise ValueError(
+            f"calculator reports energy_unit={unit!r}, which cannot be "
+            f"converted to kcal/mol. Expected one of {sorted(_TO_KCAL)}."
+        )
+    to_kcal = _TO_KCAL[unit]
 
     symbols = [
         reaction.reactant_mol.GetAtomWithIdx(i).GetSymbol()
@@ -597,7 +612,7 @@ def _attach_electronic_energies(reaction, calculator, sp_images="all"):
         finite = [e for e in energies if e == e]
         if finite and reac_ref is not None:
             peak = max(finite)
-            result["barrier_kcal"] = (peak - reac_ref) * HARTREE_TO_KCAL
+            result["barrier_kcal"] = (peak - reac_ref) * to_kcal
             result["peak_image_idx"] = idx[energies.index(peak)] + 1
         else:
             result["barrier_kcal"] = float("nan")

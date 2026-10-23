@@ -226,3 +226,59 @@ class TestScanPatience:
         # fourth factor, which patience 1 never sees
         assert len(seen) >= 4
         assert best.aligned_results[0]["score"] == 1.0
+
+
+class TestEnergyUnits:
+    """A Calculation reports in its own unit; the barrier is always kcal/mol.
+
+    XTBCalculation returns Hartree and ASECalculation returns eV, which differ
+    by a factor of 27. Assuming either one silently would put every barrier
+    from the other out by that factor.
+    """
+
+    HARTREE_TO_EV = 27.211386245988
+
+    class _EVStub(StubCalculator):
+        energy_unit = "eV"
+
+        def energy(self, atoms):
+            return super().energy(atoms) * TestEnergyUnits.HARTREE_TO_EV
+
+        def optimize(self, atoms):
+            return atoms, self.energy(atoms)
+
+    def _barrier(self, calc):
+        rxn = Reaction(reactant_smiles=R_SMI, product_smiles=P_SMI,
+                       n_conformers=2, n_seeds=1, stretch_factors=[1.5], top_k=1)
+        rxn = generate_initial_conformers(rxn)
+        return run_iterative_alignment(rxn, calculator=calc).barrier_kcal
+
+    def test_base_class_declares_hartree(self):
+        from sparta import Calculation
+        assert Calculation.energy_unit == "hartree"
+
+    def test_duck_typed_calculator_is_assumed_hartree(self):
+        """StubCalculator does not subclass Calculation and has no
+        energy_unit, so it exercises the getattr fallback that keeps
+        third-party calculators working."""
+        assert not hasattr(StubCalculator, "energy_unit")
+        assert np.isfinite(self._barrier(StubCalculator()))
+
+    def test_ase_wrapper_declares_ev(self):
+        from sparta import ASECalculation
+        assert ASECalculation.energy_unit.lower() == "ev"
+
+    def test_same_physics_in_either_unit_gives_the_same_barrier(self):
+        hartree = self._barrier(StubCalculator())
+        in_ev = self._barrier(self._EVStub())
+        assert in_ev == pytest.approx(hartree, rel=1e-9)
+
+    def test_unknown_unit_is_refused(self):
+        class Weird(StubCalculator):
+            energy_unit = "furlongs"
+
+        rxn = Reaction(reactant_smiles=R_SMI, product_smiles=P_SMI,
+                       n_conformers=2, n_seeds=1, stretch_factors=[1.5], top_k=1)
+        rxn = generate_initial_conformers(rxn)
+        with pytest.raises(ValueError, match="furlongs"):
+            run_iterative_alignment(rxn, calculator=Weird())
