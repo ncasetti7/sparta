@@ -100,7 +100,7 @@ class TestReactionInit:
         assert fresh.top_k_conformers == []
         assert fresh.aligned_results == []
 
-    def test_stretch_factors_normalised_to_list(self):
+    def test_stretch_factors_normalized_to_list(self):
         r = Reaction(
             reactant_smiles=REACTANT_SMILES,
             product_smiles=PRODUCT_SMILES,

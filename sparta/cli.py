@@ -1,5 +1,7 @@
-"""
-process_reactions_from_file.py — Batch reaction alignment from a SMILES input file.
+"""Batch reaction alignment from a SMILES input file.
+
+Installed as the ``sparta`` console script, so the examples below assume it is
+on PATH after ``pip install sparta-chem``.
 
 Input file format (CSV, one reaction per row):
     reactant_smiles,product_smiles
@@ -8,40 +10,17 @@ Input file format (CSV, one reaction per row):
 
 Usage examples::
 
-    # Minimal — hyperparameters from defaults
-    python process_reactions_from_file.py reactions.csv
+    # Minimal -- hyperparameters from defaults
+    sparta reactions.csv
 
     # With hyperparameters as flags
-    python process_reactions_from_file.py reactions.csv \\
+    sparta reactions.csv \\
         --n-conformers 10 --n-seeds 3 \\
         --stretch-factors 1.3 1.5 1.8 --top-k 5 \\
         --output results.csv
 
     # Load hyperparameters from a JSON config file
-    python process_reactions_from_file.py reactions.csv --config config.json
-
-    # Also save the best aligned conformer pair as XYZ files
-    python process_reactions_from_file.py reactions.csv --save-conformers --conformer-dir ./conformers
-
-    # Process 4 reactions in parallel
-    python process_reactions_from_file.py reactions.csv --n-reaction-workers 4
-
-Config file format (JSON)::
-
-    {
-        "n_conformers": 10,
-        "n_seeds": 3,
-        "stretch_factors": [1.3, 1.5, 1.8],
-        "top_k": 5,
-        "n_images": 15,
-        "neb_fmax": 0.001,
-        "neb_steps": 200,
-        "propagation_threshold": 0.0001,
-        "propagation_step_size": 2.0,
-        "max_iterations": 40,
-        "objective": "barrier",
-        "d_power": 4
-    }
+    sparta reactions.csv --config config.json
 """
 
 import argparse
@@ -102,7 +81,7 @@ def _process_reaction(task: tuple) -> tuple:
     task : tuple
         (idx, row, cfg, alignment_kwargs, save_conformers, conformer_dir,
          find_optimal_stretch, stretch_start, stretch_step, max_stretch,
-         n_workers, total)
+         n_workers, total, calc_spec)
 
     Returns
     -------
@@ -110,7 +89,13 @@ def _process_reaction(task: tuple) -> tuple:
     """
     (idx, row, cfg, alignment_kwargs, save_conformers, conformer_dir,
      find_optimal_stretch, stretch_start, stretch_step, max_stretch,
-     n_workers, total) = task
+     n_workers, total, calc_spec) = task
+
+    # built inside the worker: a live calculator does not need to be pickled
+    calculator = None
+    if calc_spec and calc_spec.get("kind") == "xtb":
+        from sparta import XTBCalculation
+        calculator = XTBCalculation(xtb_cmd=calc_spec.get("xtb_cmd", "xtb"))
 
     from sparta import (
         Reaction,
@@ -140,6 +125,7 @@ def _process_reaction(task: tuple) -> tuple:
                 start=stretch_start,
                 step=stretch_step,
                 max_stretch=max_stretch,
+                calculator=calculator,
                 **alignment_kwargs,
             )
         else:
@@ -148,15 +134,19 @@ def _process_reaction(task: tuple) -> tuple:
             if not rxn.top_k_conformers:
                 raise RuntimeError("No conformers generated.")
 
-            rxn = run_iterative_alignment(rxn, **alignment_kwargs)
+            rxn = run_iterative_alignment(
+                rxn, calculator=calculator, **alignment_kwargs
+            )
 
         if rxn.aligned_results:
             best_score = rxn.aligned_results[0]["score"]
             all_scores = [r["score"] for r in rxn.aligned_results]
+            barrier = rxn.aligned_results[0].get("barrier_kcal")
             status = "ok"
         else:
             best_score = None
             all_scores = []
+            barrier = None
             status = "no_results"
 
         if save_conformers and rxn.aligned_results:
@@ -166,14 +156,20 @@ def _process_reaction(task: tuple) -> tuple:
         log.append(f"    ERROR: {exc}")
         best_score = None
         all_scores = []
+        barrier = None
         status = f"error: {exc}"
 
-    log.append(f"    score = {best_score}")
+    log.append(f"    score = {best_score}"
+               + ("" if barrier is None else f"  barrier = {barrier:.2f} kcal/mol"))
 
     out = dict(row)
     out["status"] = status
     out["best_score"] = "" if best_score is None else f"{best_score:.8f}"
     out["all_scores"] = "" if not all_scores else ";".join(f"{s:.8f}" for s in all_scores)
+    if barrier is not None and barrier == barrier:
+        out["barrier_kcal"] = f"{barrier:.4f}"
+    elif calc_spec:
+        out["barrier_kcal"] = ""
 
     return idx, out, log
 
@@ -217,8 +213,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--propagation-step-size", type=float, default=None)
     p.add_argument("--max-iterations", type=int, default=None)
     p.add_argument(
-        "--objective", choices=["barrier", "total"], default=None,
-        help="'barrier' minimises the max interior image energy; 'total' minimises the sum.",
+        "--idpp-objective", dest="objective",
+        choices=["peak", "total"], default=None,
+        help="which IDPP quantity alignment minimizes: 'peak' the highest "
+             "interior image, 'total' the sum. Not the electronic barrier.",
     )
     p.add_argument("--d-power", type=int, default=None)
 
@@ -254,6 +252,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Conformer saving
     p.add_argument(
+        "--calculator", choices=["none", "xtb"], default="none",
+        help="electronic energies for the SPARTA barrier. 'none' reports the "
+             "geometric IDPP score only.",
+    )
+    p.add_argument(
+        "--xtb-cmd", default="xtb",
+        help="path to the xtb executable when --calculator xtb is used.",
+    )
+    p.add_argument(
         "--save-conformers", action="store_true",
         help="Save the best aligned conformer pair as XYZ files for each reaction.",
     )
@@ -283,7 +290,7 @@ def _merge_config(args: argparse.Namespace) -> dict:
         "propagation_threshold": 0.0001,
         "propagation_step_size": 2.0,
         "max_iterations": 40,
-        "objective": "barrier",
+        "objective": "peak",
         "d_power": 4,
     }
 
@@ -368,6 +375,8 @@ def main() -> None:
             args.save_conformers, args.conformer_dir,
             args.find_optimal_stretch, args.stretch_start, args.stretch_step, args.max_stretch,
             args.n_workers, len(rows),
+            (None if args.calculator == "none"
+             else {"kind": args.calculator, "xtb_cmd": args.xtb_cmd}),
         )
         for idx, row in enumerate(rows)
     ]

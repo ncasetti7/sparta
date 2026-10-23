@@ -135,7 +135,7 @@ class TestGetDihedrals:
         assert {b, c} == {0, 1}
 
     def test_no_ring_bonds_included(self):
-        # Benzene has only ring bonds — should return no dihedrals
+        # Benzene has only ring bonds, should return no dihedrals
         mol = Chem.MolFromSmiles("c1ccccc1")
         mol = Chem.AddHs(mol)
         dihedrals = cheminformatics.get_dihedral_matches_all(mol)

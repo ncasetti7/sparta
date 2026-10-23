@@ -1,11 +1,11 @@
 """Reference-state energies for reactant and product.
 
 A reaction's barrier is reported relative to the reactant reference energy, so
-that reference has to be a well-defined state. Optimising a multi-fragment
+that reference has to be a well-defined state. Optimizing a multi-fragment
 reactant as a single ``ase.Atoms`` object does not give one: the fragments
 start at whatever separation the distance-geometry embedding happened to
 produce (``embedFragmentsSeparately`` is False when the conformers are
-embedded), and the optimiser then relaxes into some arbitrary loosely-bound
+embedded), and the optimizer then relaxes into some arbitrary loosely-bound
 complex. The resulting energy carries an arbitrary inter-fragment interaction,
 which propagates straight into every barrier computed against it.
 
@@ -15,9 +15,9 @@ fragment (RGD1 medians 80.7 / 93.9 / 105.3 kcal/mol for 1 / 2 / 3 fragments
 while the DFT medians stayed at 23.4 / 23.6 / 22.5). That offset pushed
 genuinely low-barrier multi-fragment reactions above the pruning threshold.
 
-The fix is the standard separated-reactant reference: optimise each connected
+The fix is the standard separated-reactant reference: optimize each connected
 fragment on its own and sum the energies. For a single-fragment species this
-is exactly the previous behaviour.
+is exactly the previous behavior.
 """
 from typing import Optional, Sequence, Tuple
 
@@ -29,7 +29,7 @@ def fragment_reference_energy(
     coords: Sequence[Sequence[float]],
     calculator,
 ) -> Tuple[np.ndarray, Optional[float]]:
-    """Optimise every connected fragment of ``mol`` separately and sum energies.
+    """Optimize every connected fragment of ``mol`` separately and sum energies.
 
     Parameters
     ----------

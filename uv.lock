@@ -666,8 +666,8 @@ wheels = [
 ]
 
 [[package]]
-name = "sparta"
-version = "0.1.0"
+name = "sparta-chem"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "ase" },

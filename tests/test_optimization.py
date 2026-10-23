@@ -182,7 +182,7 @@ class TestRunIterativeAlignment:
             top_k=1,
             n_images=3,
         )
-        # top_k_conformers is empty — run_iterative_alignment should raise
+        # top_k_conformers is empty, run_iterative_alignment should raise
         with pytest.raises(ValueError, match="generate_initial_conformers"):
             run_iterative_alignment(r)
 

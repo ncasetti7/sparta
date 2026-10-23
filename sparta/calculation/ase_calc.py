@@ -10,7 +10,7 @@ from sparta.calculation.base import Calculation
 class ASECalculation(Calculation):
     """
     Wraps a generic ASE calculator for single-point energy evaluation and
-    geometry optimisation.
+    geometry optimization.
 
     The caller is responsible for configuring the calculator (including any
     charge/multiplicity settings it requires) before passing it in.
@@ -27,8 +27,11 @@ class ASECalculation(Calculation):
     fmax : float
         Force convergence criterion for :meth:`optimize` (eV/Å).
     max_steps : int
-        Maximum optimisation steps.
+        Maximum optimization steps.
     """
+
+    #: ASE reports in eV, unlike the method-native Hartree of the xtb wrapper
+    energy_unit: str = "eV"
 
     def __init__(
         self,
