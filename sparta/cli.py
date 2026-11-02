@@ -15,8 +15,8 @@ Usage examples::
 
     # With hyperparameters as flags
     sparta reactions.csv \\
-        --n-conformers 10 --n-seeds 3 \\
-        --stretch-factors 1.3 1.5 1.8 --top-k 5 \\
+        --n-conformers 30 --n-seeds 3 \\
+        --stretch-factors 1.3 1.5 1.8 --top-k 1 \\
         --output results.csv
 
     # Load hyperparameters from a JSON config file
@@ -280,10 +280,10 @@ def _merge_config(args: argparse.Namespace) -> dict:
     CLI flags taking precedence wherever provided.
     """
     defaults = {
-        "n_conformers": 10,
+        "n_conformers": 30,
         "n_seeds": 1,
         "stretch_factors": 1.5,
-        "top_k": 5,
+        "top_k": 1,
         "n_images": 15,
         "neb_fmax": 0.001,
         "neb_steps": 200,

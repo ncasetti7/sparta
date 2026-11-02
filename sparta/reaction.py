@@ -8,10 +8,10 @@ Typical usage::
     rxn = Reaction(
         reactant_smiles="[CH4:1].[F:2][F:3]>>[CH3:1][F:2].[H:4][F:3]",
         product_smiles="[CH3:1][F:2].[H:4][F:3]",
-        n_conformers=10,
+        n_conformers=30,
         n_seeds=3,
         stretch_factors=[1.3, 1.5, 1.8],
-        top_k=5,
+        top_k=1,
     )
     rxn = rxn.generate_initial_conformers().run_iterative_alignment()
 
@@ -84,10 +84,10 @@ class Reaction:
         product_smiles: str,
         charge: Optional[int] = None,
         multiplicity: Optional[int] = None,
-        n_conformers: int = 10,
+        n_conformers: int = 30,
         n_seeds: int = 1,
         stretch_factors: Union[float, List[float]] = 1.5,
-        top_k: int = 5,
+        top_k: int = 1,
         n_images: int = 15,
         filter_dihedrals: bool = True,
         k_nearest_dihedrals: int = 3,

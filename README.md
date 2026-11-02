@@ -156,10 +156,10 @@ Any object exposing the same `energy(atoms)` interface works in their place, so 
 | `product_smiles` | `str` |, | Atom-mapped SMILES for the product(s) |
 | `charge` | `int` | auto | Total charge; inferred from the SMILES when omitted |
 | `multiplicity` | `int` | auto | Spin multiplicity; inferred from the SMILES when omitted |
-| `n_conformers` | `int` | `10` | Conformers per (seed, stretch_factor) combination |
+| `n_conformers` | `int` | `30` | Conformers per (seed, stretch_factor) combination |
 | `n_seeds` | `int` | `1` | Number of random seeds (0 … n_seeds−1) |
 | `stretch_factors` | `float` or `list` | `1.5` | Stretch factor(s) applied to changing bond targets in the bounds matrix |
-| `top_k` | `int` | `5` | Number of best initial conformers to carry into iterative alignment |
+| `top_k` | `int` | `1` | Number of best initial conformers to carry into iterative alignment |
 | `n_images` | `int` | `15` | NEB images (including endpoints) |
 | `filter_dihedrals` | `bool` | `True` | Restrict optimization to dihedrals near the reaction center |
 | `k_nearest_dihedrals` | `int` | `3` | Bond-distance cutoff for dihedral filtering |
@@ -306,10 +306,10 @@ CLI flags override config file values. All keys are optional.
 
 ```json
 {
-    "n_conformers": 10,
+    "n_conformers": 30,
     "n_seeds": 3,
     "stretch_factors": [1.3, 1.5, 1.8],
-    "top_k": 5,
+    "top_k": 1,
     "n_images": 15,
     "neb_fmax": 0.001,
     "neb_steps": 200,
